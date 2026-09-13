@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Room Kit — WebXR drums</title>
+<style>
+  :root{
+    --ink:#f2ede4;
+    --ink-dim:#9a938a;
+    --bg:#16181c;
+    --panel:#1e2127;
+    --brass:#c98f3a;
+    --shell:#7d2f2a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Helvetica Neue",Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;overflow:hidden}
+  canvas{display:block}
+
+  #ui{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    padding:24px;pointer-events:none;z-index:10;
+  }
+  #panel{
+    pointer-events:auto;width:min(560px,100%);background:var(--panel);
+    border:1px solid #2b2f37;border-radius:4px;padding:28px 30px 24px;
+    box-shadow:0 24px 60px rgba(0,0,0,.55);max-height:100%;overflow:auto;
+  }
+  h1{margin:0 0 4px;font-size:30px;font-weight:600;letter-spacing:-.02em;line-height:1.05}
+  .sub{margin:0 0 22px;color:var(--ink-dim);font-size:15px;line-height:1.5;max-width:46ch}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+  button{
+    font:inherit;font-size:15px;font-weight:500;color:var(--ink);background:#282c34;
+    border:1px solid #363b45;border-radius:3px;padding:11px 18px;cursor:pointer;
+    transition:background .12s ease,border-color .12s ease;
+  }
+  button:hover:not(:disabled){background:#31363f;border-color:#454b57}
+  button:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.primary{background:var(--brass);border-color:var(--brass);color:#1a1508;font-weight:600}
+  button.primary:hover:not(:disabled){background:#daa04b;border-color:#daa04b}
+
+  dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:7px 16px;font-size:14px;line-height:1.4}
+  dt{color:var(--brass);white-space:nowrap}
+  dd{margin:0;color:var(--ink-dim)}
+  hr{border:0;border-top:1px solid #2b2f37;margin:20px 0}
+  #status{font-size:13px;color:var(--ink-dim);min-height:1.3em;margin-top:14px;line-height:1.4}
+  #status.warn{color:#d98b5a}
+  .hint{font-size:13px;color:#6d6a65;margin-top:18px;line-height:1.5}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+</head>
+<body>
+
+<div id="ui">
+  <div id="panel">
+    <h1>Room Kit</h1>
+    <p class="sub">A drum kit you can place in your room and actually hit. Put the headset on, pick a mode, then move the pieces where you want them.</p>
+
+    <div class="row">
+      <button id="btn-vr" class="primary" disabled>Play in VR</button>
+      <button id="btn-ar" disabled>Play in your room</button>
+    </div>
+
+    <dl>
+      <dt>Swing</dt><dd>Hit a drum with the stick. Harder swing, louder hit.</dd>
+      <dt>Trigger</dt><dd>Kick drum</dd>
+      <dt>Grip</dt><dd>Hi-hat pedal — hold to close the hat</dd>
+      <dt>A or X</dt><dd>Switch between playing and moving pieces</dd>
+      <dt>B or Y</dt><dd>Bring the whole kit back in front of you</dd>
+    </dl>
+
+    <hr>
+    <p class="sub" style="margin:0">No headset handy? Play from the keyboard: <strong>K</strong> kick, <strong>S</strong> snare, <strong>H</strong> hat, <strong>G</strong> open hat, <strong>1 2 3</strong> toms, <strong>C</strong> crash, <strong>R</strong> ride. Drag to look around.</p>
+
+    <div id="status"></div>
+    <p class="hint">WebXR needs a secure origin. Localhost works for desktop testing, but the headset needs the page over HTTPS.</p>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ─────────────────────────── audio ─────────────────────────── */
+
+let ac = null, master = null, noiseBuf = null, openHatVoice = null;
+
+function initAudio(){
+  if (ac) return;
+  ac = new (window.AudioContext || window.webkitAudioContext)({ latencyHint:'interactive' });
+  master = ac.createGain();
+  master.gain.value = 0.9;
+  const comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -12; comp.ratio.value = 4; comp.attack.value = 0.002; comp.release.value = 0.15;
+  master.connect(comp).connect(ac.destination);
+
+  const len = Math.floor(ac.sampleRate * 2);
+  noiseBuf = ac.createBuffer(1, len, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+}
+
+const noise = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; return s; };
+
+function env(node, peak, attack, decay, t){
+  const g = node.gain;
+  g.setValueAtTime(0.0001, t);
+  g.exponentialRampToValueAtTime(Math.max(peak, 0.0002), t + attack);
+  g.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+}
+
+function kick(v = 1){
+  const t = ac.currentTime;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(165, t);
+  o.frequency.exponentialRampToValueAtTime(44, t + 0.11);
+  env(g, 1.0 * v, 0.004, 0.44, t);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 0.6);
+
+  const n = noise(), nf = ac.createBiquadFilter(), ng = ac.createGain();
+  nf.type = 'lowpass'; nf.frequency.value = 2400;
+  env(ng, 0.35 * v, 0.001, 0.02, t);
+  n.connect(nf).connect(ng).connect(master); n.start(t); n.stop(t + 0.08);
+}
+
+function snare(v = 1){
+  const t = ac.currentTime;
+  const n = noise(), bp = ac.createBiquadFilter(), hp = ac.createBiquadFilter(), g = ac.createGain();
+  bp.type = 'bandpass'; bp.frequency.value = 1900; bp.Q.value = 0.7;
+  hp.type = 'highpass'; hp.frequency.value = 500;
+  env(g, 0.65 * v, 0.002, 0.17, t);
+  n.connect(bp).connect(hp).connect(g).connect(master); n.start(t); n.stop(t + 0.3);
+
+  [188, 247].forEach((f, i) => {
+    const o = ac.createOscillator(), og = ac.createGain();
+    o.type = 'triangle'; o.frequency.setValueAtTime(f, t);
+    o.frequency.exponentialRampToValueAtTime(f * 0.75, t + 0.09);
+    env(og, (i ? 0.22 : 0.3) * v, 0.002, 0.1, t);
+    o.connect(og).connect(master); o.start(t); o.stop(t + 0.2);
+  });
+}
+
+function tom(v = 1, f = 180){
+  const t = ac.currentTime;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(f * 1.35, t);
+  o.frequency.exponentialRampToValueAtTime(f * 0.72, t + 0.2);
+  env(g, 0.8 * v, 0.004, 0.42, t);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 0.7);
+
+  const n = noise(), nf = ac.createBiquadFilter(), ng = ac.createGain();
+  nf.type = 'bandpass'; nf.frequency.value = f * 6; nf.Q.value = 1.2;
+  env(ng, 0.18 * v, 0.001, 0.05, t);
+  n.connect(nf).connect(ng).connect(master); n.start(t); n.stop(t + 0.12);
+}
+
+function hat(v = 1, open = false){
+  const t = ac.currentTime;
+  if (openHatVoice){                       // closing chokes a ringing open hat
+    try { openHatVoice.gain.cancelScheduledValues(t);
+          openHatVoice.gain.setValueAtTime(openHatVoice.gain.value, t);
+          openHatVoice.gain.exponentialRampToValueAtTime(0.0001, t + 0.03); } catch(e){}
+    openHatVoice = null;
+  }
+  const n = noise(), hp = ac.createBiquadFilter(), bp = ac.createBiquadFilter(), g = ac.createGain();
+  hp.type = 'highpass'; hp.frequency.value = 7200;
+  bp.type = 'bandpass'; bp.frequency.value = 10500; bp.Q.value = 0.6;
+  env(g, 0.34 * v, 0.001, open ? 0.42 : 0.045, t);
+  n.connect(hp).connect(bp).connect(g).connect(master);
+  n.start(t); n.stop(t + (open ? 0.7 : 0.12));
+  if (open) openHatVoice = g;
+}
+
+function cymbal(v = 1, { decay = 1.9, hp = 5200, shimmer = 0.55 } = {}){
+  const t = ac.currentTime;
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'highpass'; f.frequency.value = hp;
+  env(g, 0.3 * v, 0.006, decay, t);
+  n.connect(f).connect(g).connect(master); n.start(t); n.stop(t + decay + 0.4);
+
+  [523, 784, 1047, 1397].forEach(fr => {   // metallic partials
+    const o = ac.createOscillator(), og = ac.createGain();
+    o.type = 'square'; o.frequency.value = fr * 2.7;
+    env(og, 0.035 * v * shimmer, 0.004, decay * 0.6, t);
+    o.connect(og).connect(master); o.start(t); o.stop(t + decay);
+  });
+}
+
+const crash = v => cymbal(v, { decay: 2.1, hp: 4600, shimmer: 0.8 });
+const ride  = v => { cymbal(v, { decay: 1.2, hp: 8200, shimmer: 0.35 });
+  const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'triangle'; o.frequency.value = 1180;
+  env(g, 0.12 * v, 0.002, 0.28, t);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 0.4); };
+
+/* ─────────────────────────── scene ─────────────────────────── */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.01, 40);
+camera.position.set(0, 1.35, 0.55);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setFoveation(0.6);
+document.body.appendChild(renderer.domElement);
+
+const roomBg = new THREE.Color(0x0d0f12);
+scene.background = roomBg;
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x2a2622, 1.1));
+const key = new THREE.DirectionalLight(0xffe6c4, 1.5);
+key.position.set(1.6, 3.2, 1.2);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 0.5);
+rim.position.set(-2, 1.6, -2.4);
+scene.add(rim);
+
+const floor = new THREE.GridHelper(8, 32, 0x3a4250, 0x22272f);
+floor.material.transparent = true; floor.material.opacity = 0.5;
+scene.add(floor);
+
+const kit = new THREE.Group();
+scene.add(kit);
+
+/* ───────────────────────── kit pieces ──────────────────────── */
+
+const DRUM_HEAD = () => new THREE.MeshStandardMaterial({
+  color:0xe8e2d4, roughness:0.85, metalness:0.0, emissive:0xffd9a0, emissiveIntensity:0 });
+const SHELL_MAT = c => new THREE.MeshStandardMaterial({ color:c, roughness:0.45, metalness:0.25 });
+const CYM_MAT = () => new THREE.MeshStandardMaterial({
+  color:0xc79a3e, roughness:0.3, metalness:0.95, side:THREE.DoubleSide,
+  emissive:0xffcf72, emissiveIntensity:0 });
+
+const pads = [];
+
+function addDrum({ name, pos, radius, depth, shellColor, sound, tilt = 0 }){
+  const g = new THREE.Group();
+  g.position.set(...pos);
+  g.rotation.x = tilt;
+
+  const shell = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius * 0.97, depth, 28, 1, true),
+    SHELL_MAT(shellColor));
+  shell.position.y = -depth / 2;
+  g.add(shell);
+
+  const headMat = DRUM_HEAD();
+  const head = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), headMat);
+  head.rotation.x = -Math.PI / 2;
+  g.add(head);
+
+  const hoop = new THREE.Mesh(
+    new THREE.TorusGeometry(radius * 1.01, radius * 0.035, 8, 30),
+    new THREE.MeshStandardMaterial({ color:0xb9bec7, roughness:0.35, metalness:0.9 }));
+  hoop.rotation.x = -Math.PI / 2;
+  g.add(hoop);
+
+  kit.add(g);
+  pads.push({ name, group:g, radius, sound, glow:headMat, lastHit:{}, home:g.position.clone(), homeRot:g.rotation.clone() });
+  return g;
+}
+
+function addCymbal({ name, pos, radius, sound, tilt }){
+  const g = new THREE.Group();
+  g.position.set(...pos);
+  g.rotation.set(tilt[0], tilt[1], tilt[2]);
+
+  const mat = CYM_MAT();
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 0.004, 40), mat);
+  g.add(disc);
+  const bell = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.22, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), mat);
+  g.add(bell);
+  const rod = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.008, 0.008, 0.5, 8),
+    new THREE.MeshStandardMaterial({ color:0x8d939c, roughness:0.4, metalness:0.8 }));
+  rod.position.y = -0.25;
+  g.add(rod);
+
+  kit.add(g);
+  pads.push({ name, group:g, radius, sound, glow:mat, lastHit:{}, home:g.position.clone(), homeRot:g.rotation.clone() });
+  return g;
+}
+
+// laid out for someone standing at the origin facing −Z
+addDrum({ name:'snare', pos:[-0.20, 0.66, -0.42], radius:0.175, depth:0.14,
+          shellColor:0xb9bec7, sound:v => snare(v) });
+addDrum({ name:'tom1',  pos:[-0.10, 0.85, -0.66], radius:0.135, depth:0.17, tilt:-0.32,
+          shellColor:0x7d2f2a, sound:v => tom(v, 235) });
+addDrum({ name:'tom2',  pos:[ 0.20, 0.85, -0.64], radius:0.155, depth:0.19, tilt:-0.32,
+          shellColor:0x7d2f2a, sound:v => tom(v, 190) });
+addDrum({ name:'floor', pos:[ 0.50, 0.60, -0.34], radius:0.20,  depth:0.34,
+          shellColor:0x7d2f2a, sound:v => tom(v, 128) });
+addDrum({ name:'kick',  pos:[ 0.02, 0.30, -0.78], radius:0.28,  depth:0.36, tilt:-Math.PI / 2,
+          shellColor:0x7d2f2a, sound:v => kick(v) });
+
+addCymbal({ name:'hat',   pos:[-0.52, 0.80, -0.38], radius:0.165, tilt:[0.10, 0, 0.05],
+            sound:v => hat(v, !hatClosed) });
+addCymbal({ name:'crash', pos:[-0.52, 1.14, -0.66], radius:0.215, tilt:[0.30, 0, 0.22],
+            sound:v => crash(v) });
+addCymbal({ name:'ride',  pos:[ 0.58, 1.02, -0.60], radius:0.26,  tilt:[0.22, 0, -0.20],
+            sound:v => ride(v) });
+
+/* ───────────────────── controllers & sticks ────────────────── */
+
+const STICK_LEN = 0.38;
+const sticks = [];
+let editMode = false, hatClosed = false;
+
+const tipMarkerMat = new THREE.MeshStandardMaterial({
+  color:0xc98f3a, emissive:0xc98f3a, emissiveIntensity:0.35, roughness:0.5 });
+
+for (let i = 0; i < 2; i++){
+  const c = renderer.xr.getController(i);
+  scene.add(c);
+
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.008, 0.012, STICK_LEN, 10),
+    new THREE.MeshStandardMaterial({ color:0xd8bd93, roughness:0.7 }));
+  shaft.rotation.x = -Math.PI / 2;
+  shaft.position.z = -STICK_LEN / 2;
+  c.add(shaft);
+
+  const tipBall = new THREE.Mesh(new THREE.SphereGeometry(0.016, 12, 10), tipMarkerMat);
+  tipBall.position.z = -STICK_LEN;
+  c.add(tipBall);
+
+  const st = { ctrl:c, prevTip:new THREE.Vector3(), hasPrev:false, src:null,
+               held:null, wasPressed:{}, tipBall };
+  c.addEventListener('connected', e => { st.src = e.data; });
+  c.addEventListener('disconnected', () => { st.src = null; st.hasPrev = false; });
+  sticks.push(st);
+}
+
+function tipWorld(st, out){
+  return out.set(0, 0, -STICK_LEN).applyMatrix4(st.ctrl.matrixWorld);
+}
+
+function buzz(st, strength, ms){
+  const a = st.src?.gamepad?.hapticActuators?.[0];
+  if (a?.pulse) { try { a.pulse(Math.min(1, strength), ms); } catch(e){} }
+}
+
+/* ───────────────────── hit detection ───────────────────────── */
+
+const _c = new THREE.Vector3(), _n = new THREE.Vector3(), _p = new THREE.Vector3(),
+      _tip = new THREE.Vector3(), _seg = new THREE.Vector3(), _rel = new THREE.Vector3();
+
+function strike(pad, vel, st){
+  const v = THREE.MathUtils.clamp((vel - 0.25) / 3.2, 0.12, 1);
+  pad.sound(v);
+  pad.glow.emissiveIntensity = 0.45 + 0.55 * v;
+  if (st) buzz(st, 0.25 + 0.6 * v, 22 + 26 * v);
+}
+
+function checkPad(pad, st, idx, now, dt){
+  pad.group.getWorldPosition(_c);
+  _n.set(0, 1, 0).applyQuaternion(pad.group.getWorldQuaternion(new THREE.Quaternion())).normalize();
+
+  const dPrev = _p.copy(st.prevTip).sub(_c).dot(_n);
+  const dNow  = _rel.copy(_tip).sub(_c).dot(_n);
+  if (!(dPrev > 0 && dNow <= 0)) return;              // only downward crossings
+
+  const t = dPrev / (dPrev - dNow || 1e-6);
+  _p.copy(st.prevTip).lerp(_tip, t);                  // point on the plane
+  _p.sub(_c);
+  _p.addScaledVector(_n, -_p.dot(_n));                // project into the head
+  if (_p.length() > pad.radius) return;
+
+  if (now - (pad.lastHit[idx] || 0) < 55) return;     // debounce per stick
+  pad.lastHit[idx] = now;
+
+  const speed = _seg.copy(_tip).sub(st.prevTip).length() / Math.max(dt, 1e-4);
+  strike(pad, speed, st);
+}
+
+/* ─────────────────── buttons, grabbing, recenter ───────────── */
+
+function edgePressed(st, index){
+  const b = st.src?.gamepad?.buttons?.[index];
+  if (!b) return false;
+  const now = !!b.pressed;
+  const was = st.wasPressed[index] || false;
+  st.wasPressed[index] = now;
+  return now && !was;
+}
+const isDown = (st, i) => !!st.src?.gamepad?.buttons?.[i]?.pressed;
+
+function setEditMode(on){
+  editMode = on;
+  tipMarkerMat.color.setHex(on ? 0x63b3ff : 0xc98f3a);
+  tipMarkerMat.emissive.setHex(on ? 0x63b3ff : 0xc98f3a);
+  floor.material.opacity = on ? 0.75 : 0.5;
+}
+
+function nearestPad(point, maxDist){
+  let best = null, bestD = maxDist;
+  for (const pad of pads){
+    const d = pad.group.getWorldPosition(_c).distanceTo(point);
+    if (d < bestD){ bestD = d; best = pad; }
+  }
+  return best;
+}
+
+function recenterKit(){
+  const head = renderer.xr.getCamera();
+  const p = new THREE.Vector3(), q = new THREE.Quaternion();
+  head.getWorldPosition(p); head.getWorldQuaternion(q);
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q); fwd.y = 0; fwd.normalize();
+  kit.position.set(p.x, 0, p.z);
+  kit.rotation.y = Math.atan2(fwd.x, fwd.z) - Math.PI;
+  for (const pad of pads){
+    if (pad.group.parent !== kit) kit.attach(pad.group);
+    pad.group.position.copy(pad.home);
+    pad.group.rotation.copy(pad.homeRot);
+  }
+  for (const st of sticks) st.held = null;
+}
+
+/* ──────────────────────── main loop ────────────────────────── */
+
+const clock = new THREE.Clock();
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const now = performance.now();
+
+  let anyHatDown = false;
+
+  for (let i = 0; i < sticks.length; i++){
+    const st = sticks[i];
+    if (!st.src) continue;
+
+    if (isDown(st, 1)) anyHatDown = true;                 // grip → hi-hat pedal
+    if (edgePressed(st, 4)) setEditMode(!editMode);       // A / X
+    if (edgePressed(st, 5)) recenterKit();                // B / Y
+
+    tipWorld(st, _tip);
+
+    if (editMode){
+      if (edgePressed(st, 0)){
+        const pad = nearestPad(_tip, 0.45);
+        if (pad){ st.held = pad; st.ctrl.attach(pad.group); buzz(st, 0.4, 40); }
+      }
+      if (st.held && !isDown(st, 0)){
+        kit.attach(st.held.group);
+        st.held.home = st.held.group.position.clone();
+        st.held.homeRot = st.held.group.rotation.clone();
+        st.held = null; buzz(st, 0.3, 30);
+      }
+    } else {
+      if (edgePressed(st, 0)){                            // trigger → kick
+        const kickPad = pads.find(p => p.name === 'kick');
+        strike(kickPad, 2.4, st);
+      }
+      if (st.hasPrev){
+        for (const pad of pads){
+          if (pad.name === 'kick') continue;              // kick lives on the trigger
+          checkPad(pad, st, i, now, dt);
+        }
+      }
+    }
+
+    st.prevTip.copy(_tip);
+    st.hasPrev = true;
+  }
+
+  hatClosed = anyHatDown;
+  const hatPad = pads.find(p => p.name === 'hat');
+  if (hatPad) hatPad.group.position.y = hatPad.home.y - (hatClosed ? 0.035 : 0);
+
+  for (const pad of pads){
+    if (pad.glow.emissiveIntensity > 0)
+      pad.glow.emissiveIntensity = Math.max(0, pad.glow.emissiveIntensity - dt * 3.2);
+  }
+
+  renderer.render(scene, camera);
+});
+
+/* ─────────────────── session start / fallback ──────────────── */
+
+const statusEl = document.getElementById('status');
+const btnVR = document.getElementById('btn-vr');
+const btnAR = document.getElementById('btn-ar');
+const ui = document.getElementById('ui');
+
+function say(msg, warn = false){ statusEl.textContent = msg; statusEl.className = warn ? 'warn' : ''; }
+
+async function probe(){
+  if (!navigator.xr){
+    say(isSecureContext
+      ? 'No WebXR in this browser. Keyboard mode still works.'
+      : 'WebXR needs HTTPS. Serve this page securely, then reload in the headset.', true);
+    return;
+  }
+  const [vr, ar] = await Promise.all([
+    navigator.xr.isSessionSupported('immersive-vr').catch(() => false),
+    navigator.xr.isSessionSupported('immersive-ar').catch(() => false),
+  ]);
+  btnVR.disabled = !vr; btnAR.disabled = !ar;
+  if (!vr && !ar) say('No headset detected. Keyboard mode still works.', true);
+  else if (!ar) say('Passthrough not offered here — VR mode is ready.');
+  else say('Headset ready.');
+}
+probe();
+
+async function enter(mode){
+  initAudio();
+  await ac.resume();
+  try{
+    const session = await navigator.xr.requestSession(mode, {
+      requiredFeatures:['local-floor'],
+      optionalFeatures:['bounded-floor'],
+    });
+    const passthrough = (mode === 'immersive-ar');
+    scene.background = passthrough ? null : roomBg;
+    floor.visible = !passthrough;
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(session);
+    ui.style.display = 'none';
+    session.addEventListener('end', () => {
+      ui.style.display = 'flex';
+      scene.background = roomBg; floor.visible = true;
+      setEditMode(false);
+      for (const st of sticks) st.hasPrev = false;
+      say('Session ended.');
+    });
+  } catch(err){
+    say('Could not start: ' + err.message, true);
+  }
+}
+
+btnVR.addEventListener('click', () => enter('immersive-vr'));
+btnAR.addEventListener('click', () => enter('immersive-ar'));
+
+// keyboard fallback so you can hear the kit without a headset
+const KEYS = { k:() => kick(1), s:() => snare(1), h:() => hat(1, false), g:() => hat(1, true),
+               1:() => tom(1, 235), 2:() => tom(1, 190), 3:() => tom(1, 128),
+               c:() => crash(1), r:() => ride(1) };
+const KEYPAD = { k:'kick', s:'snare', h:'hat', g:'hat', 1:'tom1', 2:'tom2', 3:'floor', c:'crash', r:'ride' };
+
+addEventListener('keydown', e => {
+  if (e.repeat) return;
+  const fn = KEYS[e.key.toLowerCase()];
+  if (!fn) return;
+  initAudio(); ac.resume(); fn();
+  const pad = pads.find(p => p.name === KEYPAD[e.key.toLowerCase()]);
+  if (pad) pad.glow.emissiveIntensity = 0.9;
+});
+
+// desktop look-around
+let dragging = false, lx = 0, ly = 0, yaw = 0, pitch = -0.22;
+renderer.domElement.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; });
+addEventListener('pointerup', () => dragging = false);
+addEventListener('pointermove', e => {
+  if (!dragging || renderer.xr.isPresenting) return;
+  yaw -= (e.clientX - lx) * 0.005;
+  pitch = THREE.MathUtils.clamp(pitch - (e.clientY - ly) * 0.005, -1.2, 0.9);
+  lx = e.clientX; ly = e.clientY;
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+});
+camera.rotation.set(pitch, yaw, 0, 'YXZ');
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
