@@ -27,7 +27,7 @@
   label{font-size:13px;color:var(--dim);display:block;margin-bottom:5px}
   select,input[type=file]{font:inherit;font-size:14px;color:var(--ink);background:#1b202a;
     border:1px solid #28303d;border-radius:3px;padding:8px 10px;width:100%}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:18px}
   .bar{height:3px;background:#1b202a;border-radius:2px;overflow:hidden;margin:12px 0}
   .bar i{display:block;height:100%;width:0;background:var(--blue);transition:width .15s}
   #status{font-size:13px;color:var(--dim);line-height:1.45;min-height:1.3em}
@@ -44,7 +44,7 @@
 
 <div id="ui"><div id="panel">
   <h1>Cut<em>line</em></h1>
-  <p class="sub">Load a track and it charts itself — onsets in the low end become low blocks, cymbals and snares go up top. Everything else is adjustable from inside the headset.</p>
+  <p class="sub">Load a track and it charts itself from the drums — kicks low, snares in the middle, cymbals up top. Everything else is adjustable from inside the headset.</p>
 
   <div class="row" style="flex-direction:column;align-items:stretch;gap:6px">
     <label for="file">Track</label>
@@ -53,20 +53,29 @@
 
   <div class="grid">
     <div>
-      <label for="diff">Difficulty</label>
+      <label for="diff">Density</label>
       <select id="diff">
-        <option value="0.50">Easy</option>
-        <option value="0.33" selected>Normal</option>
-        <option value="0.22">Hard</option>
-        <option value="0.15">Expert</option>
+        <option value="0">Easy</option>
+        <option value="1" selected>Normal</option>
+        <option value="2">Hard</option>
+        <option value="3">Expert</option>
       </select>
     </div>
     <div>
-      <label for="speed">Block speed</label>
+      <label for="speed">Speed</label>
       <select id="speed">
-        <option value="7">Slow</option>
-        <option value="9" selected>Medium</option>
-        <option value="11.5">Fast</option>
+        <option value="0">Slow</option>
+        <option value="1" selected>Medium</option>
+        <option value="2">Fast</option>
+      </select>
+    </div>
+    <div>
+      <label for="len">Hit window</label>
+      <select id="len">
+        <option value="0">Strict</option>
+        <option value="1">Normal</option>
+        <option value="2" selected>Forgiving</option>
+        <option value="3">Any direction</option>
       </select>
     </div>
   </div>
@@ -81,7 +90,7 @@
   </div>
 
   <p class="hint">Drop an MP3 named <code>song.mp3</code> next to this file and it loads automatically. Or add <code>?song=mytrack.mp3</code> to the URL.<br>
-  In the headset: <strong>B or Y</strong> opens the menu — calibration, difficulty, speed and exit all live there. Point and pull the trigger to pick.</p>
+  In the headset: <strong>B or Y</strong> opens the menu — calibration, hit window, density, speed and exit all live there.</p>
 </div></div>
 
 <script type="module">
@@ -122,26 +131,34 @@ function fft(re, im){
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
+/* Bands aimed at drum voices rather than broad thirds of the spectrum.
+   Snare gets two windows: shell body down low, wire snap up high. */
+const BANDS = [
+  [[35, 110]],                  // kick
+  [[170, 330], [1800, 5500]],   // snare
+  [[7000, 13000]],              // hats / cymbals
+];
+
 async function analyze(buf, onProgress){
   const N = 2048, HOP = 512, sr = buf.sampleRate;
-  const chans = buf.numberOfChannels;
   const L = buf.getChannelData(0);
-  const R = chans > 1 ? buf.getChannelData(1) : null;
+  const R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
   const frames = Math.floor((buf.length - N) / HOP);
+  const half = N >> 1;
 
   const win = new Float32Array(N);
   for (let i=0;i<N;i++) win[i] = 0.5 - 0.5*Math.cos(2*Math.PI*i/(N-1));
 
   const binHz = sr / N;
-  const bands = [
-    { lo: Math.max(1, Math.floor(30/binHz)), hi: Math.floor(190/binHz) },
-    { lo: Math.floor(190/binHz),             hi: Math.floor(2200/binHz) },
-    { lo: Math.floor(2200/binHz),            hi: Math.min(N>>1, Math.floor(11000/binHz)) },
-  ];
+  const ranges = BANDS.map(b => b.map(([lo,hi]) =>
+    [ Math.max(1, Math.floor(lo/binHz)), Math.min(half, Math.ceil(hi/binHz)) ]));
 
-  const env = bands.map(() => new Float32Array(frames));
-  const prevMag = new Float32Array(N>>1);
+  const env = BANDS.map(() => new Float32Array(frames));
   const re = new Float32Array(N), im = new Float32Array(N);
+  const mag = new Float32Array(half);
+  const ema = new Float32Array(half);      // slow per-bin average = sustained content
+  const perc = new Float32Array(half);     // what's left = transients
+  const prevPerc = new Float32Array(half);
 
   for (let f=0; f<frames; f++){
     const off = f*HOP;
@@ -150,17 +167,31 @@ async function analyze(buf, onProgress){
       re[i] = s*win[i]; im[i] = 0;
     }
     fft(re, im);
+
+    /* Percussive emphasis: subtract a slow moving average of each bin, so
+       held notes — vocals, guitar, pads, bass tones — fall away and only
+       sharp attacks survive. This is what makes it track the kit instead
+       of every note in the song. */
+    for (let k=0;k<half;k++){
+      const m = Math.hypot(re[k], im[k]);
+      mag[k] = m;
+      const e = ema[k];
+      perc[k] = m > e ? m - e : 0;
+      ema[k] = e*0.86 + m*0.14;
+    }
+
     for (let b=0;b<3;b++){
       let flux = 0;
-      for (let k=bands[b].lo;k<bands[b].hi;k++){
-        const mag = Math.hypot(re[k], im[k]);
-        const d = mag - prevMag[k];
-        if (d > 0) flux += d;
-      }
+      for (const [lo,hi] of ranges[b])
+        for (let k=lo;k<hi;k++){
+          const d = perc[k] - prevPerc[k];
+          if (d > 0) flux += d;
+        }
       env[b][f] = flux;
     }
-    for (let k=0;k<(N>>1);k++) prevMag[k] = Math.hypot(re[k], im[k]);
-    if ((f & 255) === 0){ onProgress(f/frames * 0.85); await yieldFrame(); }
+    prevPerc.set(perc);
+
+    if ((f & 255) === 0){ onProgress(f/frames * 0.82); await yieldFrame(); }
   }
 
   for (let b=0;b<3;b++){
@@ -169,9 +200,11 @@ async function analyze(buf, onProgress){
     if (mx > 0) for (let f=0;f<frames;f++) env[b][f] /= mx;
   }
 
-  const sum = new Float32Array(frames);
-  for (let f=0;f<frames;f++) sum[f] = env[0][f]*1.3 + env[1][f] + env[2][f]*0.8;
+  /* tempo */
   const fps = sr / HOP;
+  const sum = new Float32Array(frames);
+  for (let f=0;f<frames;f++) sum[f] = env[0][f]*1.4 + env[1][f]*1.1 + env[2][f]*0.6;
+
   let bestLag = 0, bestVal = -1;
   for (let lag = Math.floor(fps*0.30); lag < Math.floor(fps*1.05); lag++){
     let acc = 0;
@@ -182,25 +215,38 @@ async function analyze(buf, onProgress){
   let beat = bestLag / fps;
   while (beat > 0.75) beat /= 2;
   while (beat < 0.30) beat *= 2;
-  onProgress(0.92); await yieldFrame();
 
-  const W = 22, onsets = [];
+  /* beat phase — where the grid actually starts */
+  let phase = 0, phScore = -1;
+  const PH = 64;
+  for (let p=0;p<PH;p++){
+    const ph = p/PH*beat;
+    let sc = 0;
+    for (let t=ph; t*fps < frames; t += beat) sc += sum[Math.round(t*fps)] || 0;
+    if (sc > phScore){ phScore = sc; phase = ph; }
+  }
+  onProgress(0.9); await yieldFrame();
+
+  /* peak pick per band */
+  const W = 20, onsets = [];
   for (let b=0;b<3;b++){
     const e = env[b];
     for (let f=2; f<frames-2; f++){
       const v = e[f];
-      if (v < 0.035) continue;
+      if (v < 0.03) continue;
       if (v < e[f-1] || v < e[f+1] || v < e[f-2] || v < e[f+2]) continue;
       let mean = 0, n = 0;
       for (let k=Math.max(0,f-W); k<Math.min(frames,f+W); k++){ mean += e[k]; n++; }
       mean /= n;
-      if (v < mean*1.65 + 0.02) continue;
-      onsets.push({ t: f*HOP/sr, band:b, strength: Math.min(1, v/(mean*3+0.05)) });
+      if (v < mean*1.55 + 0.018) continue;
+      let strength = Math.min(1, v/(mean*3+0.05));
+      if (b === 0) strength *= 1.25;        // the kick is the spine of the groove
+      onsets.push({ t: f*HOP/sr, band:b, strength });
     }
   }
-  onsets.sort((a,b) => a.t - b.t);
+
   onProgress(1);
-  return { onsets, bpm: Math.round(60/beat), beat, duration: buf.duration };
+  return { onsets, bpm: Math.round(60/beat), beat, phase, duration: buf.duration };
 }
 
 /* ══════════════════ chart ══════════════════ */
@@ -210,17 +256,32 @@ const DIRS = { up:[0,1], down:[0,-1], left:[-1,0], right:[1,0],
 const DIR_ANGLE = { up:0, upR:-Math.PI/4, right:-Math.PI/2, dnR:-3*Math.PI/4,
   down:Math.PI, dnL:3*Math.PI/4, left:Math.PI/2, upL:Math.PI/4 };
 
-function buildChart(analysis, minGap){
-  const { onsets, beat } = analysis;
-  const notes = [];
-  let lastT = -99, hand = 0, lastCol = [1,2];
-  const q = beat/4;
-  const snap = t => { const g = Math.round(t/q)*q; return Math.abs(g-t) < 0.055 ? g : t; };
+function buildChart(a, minGap){
+  const { onsets, beat, phase } = a;
 
-  for (const o of onsets){
-    const t = snap(o.t);
-    if (t - lastT < minGap || t < 1.8) continue;
-    lastT = t;
+  /* snap to the sixteenth-note grid, and reward onsets that land on it */
+  const step = beat/4;
+  const scored = onsets.map(o => {
+    const g = phase + Math.round((o.t - phase)/step)*step;
+    const onGrid = Math.abs(g - o.t) < 0.06;
+    return { t: onGrid ? g : o.t, band:o.band, strength: o.strength * (onGrid ? 1.3 : 1) };
+  });
+
+  /* Thin by strength, not by arrival order — so a weak hat no longer
+     elbows out the kick landing 40 ms later. */
+  const byStrength = scored.slice().sort((x,y) => y.strength - x.strength);
+  const kept = [];
+  for (const o of byStrength){
+    if (o.t < 1.8) continue;
+    let clear = true;
+    for (const k of kept) if (Math.abs(k.t - o.t) < minGap){ clear = false; break; }
+    if (clear) kept.push(o);
+  }
+  kept.sort((x,y) => x.t - y.t);
+
+  const notes = [];
+  let hand = 0, lastCol = [1,2];
+  for (const o of kept){
     const row = o.band;
     hand ^= 1;
     const h = hand;
@@ -233,10 +294,29 @@ function buildChart(analysis, minGap){
     if (row === 0) dir = Math.random() < 0.75 ? 'up' : (h ? 'upR' : 'upL');
     else if (row === 2) dir = Math.random() < 0.7 ? 'down' : (h ? 'dnR' : 'dnL');
     else dir = h ? 'left' : 'right';
-    notes.push({ t, col, row, hand:h, dir, strength:o.strength, hit:false, spawned:false });
+    notes.push({ t:o.t, col, row, hand:h, dir, strength:o.strength, hit:false, spawned:false });
   }
   return notes;
 }
+
+/* ══════════════════ settings ══════════════════ */
+
+const DIFFS  = [ {name:'Easy',gap:0.50},{name:'Normal',gap:0.33},{name:'Hard',gap:0.22},{name:'Expert',gap:0.15} ];
+const SPEEDS = [ {name:'Slow',v:7},{name:'Medium',v:9},{name:'Fast',v:11.5} ];
+const LENS   = [
+  { name:'Strict',        box:0.60, spd:2.0, align:0.62, late:1.2 },
+  { name:'Normal',        box:0.78, spd:1.5, align:0.40, late:1.9 },
+  { name:'Forgiving',     box:1.00, spd:1.0, align:0.15, late:2.7 },
+  { name:'Any direction', box:1.20, spd:0.7, align:-2,   late:3.3 },
+];
+
+let diffIdx  = Number(localStorage.getItem('cutline.diff')  ?? 1);
+let speedIdx = Number(localStorage.getItem('cutline.speed') ?? 1);
+let lenIdx   = Number(localStorage.getItem('cutline.len')   ?? 2);
+let syncOffsetMs = Number(localStorage.getItem('cutline.offset') || 0);
+
+const LEN = () => LENS[lenIdx];
+const speed = () => SPEEDS[speedIdx].v;
 
 /* ══════════════════ scene ══════════════════ */
 
@@ -261,7 +341,6 @@ const key = new THREE.DirectionalLight(0xbfd8ff, 0.9); key.position.set(1,3,2); 
 
 const RED = 0xff2d6b, BLUE = 0x15d6ff;
 
-/* neon runway */
 const grid = new THREE.GridHelper(6, 12, 0x1d4e6b, 0x12304a);
 grid.position.z = -8; grid.scale.z = 4;
 grid.material.transparent = true; grid.material.opacity = 0.5;
@@ -278,8 +357,6 @@ for (const side of [-1, 1]){
   halo.position.copy(rail.position);
   scene.add(halo);
 }
-
-/* ── rounded, glowing blocks ── */
 
 const COL_X = c => (c - 1.5) * 0.45;
 const ROW_Y = r => 0.88 + r * 0.42;
@@ -302,7 +379,6 @@ function roundedBoxGeo(w, h, d, r){
   g.center();
   return g;
 }
-
 const coreGeo = roundedBoxGeo(BLOCK, BLOCK, BLOCK, BLOCK*0.22);
 const haloGeo = roundedBoxGeo(BLOCK*1.26, BLOCK*1.26, BLOCK*1.26, BLOCK*0.3);
 
@@ -316,7 +392,15 @@ function arrowTexture(){
   g.closePath(); g.fill();
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
-const arrowTex = arrowTexture();
+function dotTexture(){
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.shadowColor = '#ffffff'; g.shadowBlur = 18;
+  g.fillStyle = '#ffffff';
+  g.beginPath(); g.arc(64,64,26,0,Math.PI*2); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const arrowTex = arrowTexture(), dotTex = dotTexture();
 
 const POOL = 48, blocks = [];
 const arrowGeo = new THREE.PlaneGeometry(BLOCK*0.6, BLOCK*0.6);
@@ -346,8 +430,7 @@ const shardGeo = new THREE.BoxGeometry(1,1,1);
 for (let i=0;i<SHARDS;i++){
   const m = new THREE.Mesh(shardGeo, new THREE.MeshBasicMaterial({
     color:RED, transparent:true, opacity:1, blending:THREE.AdditiveBlending, depthWrite:false }));
-  m.visible = false;
-  scene.add(m);
+  m.visible = false; scene.add(m);
   shards.push({ m, vel:new THREE.Vector3(), spin:new THREE.Vector3(), life:0, max:1 });
 }
 let shardCursor = 0;
@@ -376,11 +459,10 @@ function burst(pos, colorHex, dirVec, power){
     s.m.position.y += (Math.random()-0.5)*BLOCK*0.8;
     s.m.position.z += (Math.random()-0.5)*BLOCK*0.8;
     s.m.rotation.set(Math.random()*6, Math.random()*6, Math.random()*6);
-    // mostly along the slice, with spread
     s.vel.set(dirVec.x, dirVec.y, 0).multiplyScalar(1.4 + Math.random()*2.6*power);
     s.vel.x += (Math.random()-0.5)*2.2;
     s.vel.y += (Math.random()-0.5)*2.2;
-    s.vel.z += 1.2 + Math.random()*2.4;      // blow toward the player
+    s.vel.z += 1.2 + Math.random()*2.4;
     s.spin.set((Math.random()-0.5)*16, (Math.random()-0.5)*16, (Math.random()-0.5)*16);
     s.life = 0; s.max = 0.5 + Math.random()*0.45;
   }
@@ -407,8 +489,7 @@ function stepDebris(dt){
     if (!f.m.visible) continue;
     f.life += dt;
     if (f.life > 0.26){ f.m.visible = false; continue; }
-    const k = f.life/0.26;
-    const sc = 0.3 + k*1.5;
+    const k = f.life/0.26, sc = 0.3 + k*1.5;
     f.m.scale.set(sc, sc, 1);
     f.m.material.opacity = 0.9*(1-k);
     f.m.lookAt(camera.position);
@@ -435,7 +516,6 @@ for (let i=0;i<2;i++){
     new THREE.MeshStandardMaterial({ color:0x20242e, roughness:0.6 }));
   hilt.rotation.x = -Math.PI/2; hilt.position.z = -0.02;
   c.add(hilt);
-
   const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 3, 6),
     new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.55,
       blending:THREE.AdditiveBlending, depthWrite:false }));
@@ -495,31 +575,28 @@ drawHud('ready');
 
 /* ══════════════════ in-VR menu ══════════════════ */
 
-const MW = 1024, MH = 760;
+const MW = 1024, MH = 820;
 const menuCanvas = document.createElement('canvas');
 menuCanvas.width = MW; menuCanvas.height = MH;
 const mg = menuCanvas.getContext('2d');
 const menuTex = new THREE.CanvasTexture(menuCanvas);
 menuTex.colorSpace = THREE.SRGBColorSpace;
-const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.854),
+const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.921),
   new THREE.MeshBasicMaterial({ map:menuTex, transparent:true }));
 menuMesh.visible = false;
 scene.add(menuMesh);
 
-const ROW_H = 78, ROW_TOP = 180;
+const ROW_H = 76, ROW_TOP = 192;
 const ITEMS = [
-  { id:'resume',  label:() => playing ? 'Resume' : (songStarted ? 'Resume' : 'Start') },
+  { id:'resume',  label:() => songStarted ? 'Resume' : 'Start' },
   { id:'restart', label:() => 'Restart song' },
   { id:'calib',   label:() => 'Calibrate timing' },
   { id:'offset',  label:() => 'Offset', value:() => (syncOffsetMs>0?'+':'') + syncOffsetMs + ' ms', split:true },
-  { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
+  { id:'len',     label:() => 'Hit window', value:() => LENS[lenIdx].name },
+  { id:'diff',    label:() => 'Density', value:() => DIFFS[diffIdx].name },
   { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
   { id:'exit',    label:() => 'Exit to desktop' },
 ];
-
-const DIFFS = [ {name:'Easy',gap:0.50},{name:'Normal',gap:0.33},{name:'Hard',gap:0.22},{name:'Expert',gap:0.15} ];
-const SPEEDS = [ {name:'Slow',v:7},{name:'Medium',v:9},{name:'Fast',v:11.5} ];
-let diffIdx = 1, speedIdx = 1, syncOffsetMs = 0;
 
 let menuOpen = false, hoverIdx = -1, hoverSide = 0, calib = null, songStarted = false;
 
@@ -536,43 +613,42 @@ function drawMenu(){
   mg.fillStyle = '#eef2f7';
   mg.font = '600 52px Inter, Helvetica, Arial';
   mg.shadowColor = '#15d6ff'; mg.shadowBlur = 16;
-  mg.fillText(calib ? 'Calibrating' : 'Cutline', MW/2, 76);
+  mg.fillText(calib ? 'Calibrating' : 'Cutline', MW/2, 78);
   mg.shadowBlur = 0;
 
   mg.font = '400 26px Inter, Helvetica, Arial';
   mg.fillStyle = '#8b93a0';
   if (calib){
-    mg.fillText('Pull either trigger on each beep.', MW/2, 124);
-    mg.font = '600 90px Inter, Helvetica, Arial';
+    mg.fillText('Pull either trigger on each beep.', MW/2, 128);
+    mg.font = '600 92px Inter, Helvetica, Arial';
     mg.fillStyle = '#ffc24a';
-    mg.fillText(calib.taps.length + ' / ' + calib.times.length, MW/2, 330);
+    mg.fillText(calib.taps.length + ' / ' + calib.times.length, MW/2, 340);
     mg.font = '400 26px Inter, Helvetica, Arial';
     mg.fillStyle = '#5f6774';
-    mg.fillText('Don\'t think about it — just tap along.', MW/2, 400);
+    mg.fillText("Don't think about it — just tap along.", MW/2, 412);
     menuTex.needsUpdate = true;
     return;
   }
   mg.fillText(score > 0 ? (score.toLocaleString() + ' · ' + hits + '/' + (hits+misses) + ' · best ' + best + 'x')
-                        : 'Point and pull the trigger', MW/2, 124);
+                        : 'Point and pull the trigger', MW/2, 128);
 
   ITEMS.forEach((it, i) => {
     const y = ROW_TOP + i*ROW_H;
     const on = i === hoverIdx;
     if (on){
       mg.fillStyle = 'rgba(21,214,255,0.14)';
-      mg.fillRect(48, y-44, MW-96, ROW_H-10);
+      mg.fillRect(48, y-44, MW-96, ROW_H-8);
       mg.strokeStyle = 'rgba(21,214,255,0.5)'; mg.lineWidth = 2;
-      mg.strokeRect(48, y-44, MW-96, ROW_H-10);
+      mg.strokeRect(48, y-44, MW-96, ROW_H-8);
     }
     mg.textAlign = 'left';
     mg.font = '500 36px Inter, Helvetica, Arial';
     mg.fillStyle = it.id === 'exit' ? '#ff6b8a' : (on ? '#ffffff' : '#c9d2de');
     mg.fillText(it.label(), 82, y);
-
     if (it.value){
       mg.textAlign = 'right';
       mg.fillStyle = '#ffc24a';
-      mg.font = '600 36px Inter, Helvetica, Arial';
+      mg.font = '600 34px Inter, Helvetica, Arial';
       mg.fillText(it.value(), MW-82, y);
       if (it.split){
         mg.textAlign = 'center';
@@ -600,7 +676,6 @@ function openMenu(){
   for (const s of sabers) s.ray.visible = true;
   drawMenu();
 }
-
 function closeMenu(){
   menuOpen = false; hoverIdx = -1;
   menuMesh.visible = false;
@@ -628,26 +703,26 @@ function menuPick(s){
   return { idx, side, dist: hit.distance };
 }
 
+function save(){
+  localStorage.setItem('cutline.diff', String(diffIdx));
+  localStorage.setItem('cutline.speed', String(speedIdx));
+  localStorage.setItem('cutline.len', String(lenIdx));
+  localStorage.setItem('cutline.offset', String(syncOffsetMs));
+}
+
 function activate(id, side, s){
   switch(id){
-    case 'resume':
-      if (!songStarted) startSong(); else resumeSong();
-      closeMenu(); break;
+    case 'resume': if (!songStarted) startSong(); else resumeSong(); closeMenu(); break;
     case 'restart': startSong(); closeMenu(); break;
     case 'calib': startCalibration(); break;
     case 'offset':
-      syncOffsetMs = Math.max(-300, Math.min(300, syncOffsetMs + (side >= 0 ? 5 : -5)));
-      localStorage.setItem('cutline.offset', String(syncOffsetMs));
-      break;
-    case 'diff':
-      diffIdx = (diffIdx+1) % DIFFS.length;
-      rechartFromVR(); break;
-    case 'speed':
-      speedIdx = (speedIdx+1) % SPEEDS.length; break;
-    case 'exit':
-      if (renderer.xr.getSession()) renderer.xr.getSession().end();
-      break;
+      syncOffsetMs = Math.max(-300, Math.min(300, syncOffsetMs + (side >= 0 ? 5 : -5))); break;
+    case 'len':   lenIdx = (lenIdx+1) % LENS.length; break;
+    case 'diff':  diffIdx = (diffIdx+1) % DIFFS.length; rechartLive(); break;
+    case 'speed': speedIdx = (speedIdx+1) % SPEEDS.length; break;
+    case 'exit':  renderer.xr.getSession()?.end(); break;
   }
+  save();
   buzz(s, 0.4, 25);
   drawMenu();
 }
@@ -663,7 +738,6 @@ function click(at){
   o.connect(g).connect(ac.destination);
   o.start(at); o.stop(at+0.1);
 }
-
 function startCalibration(){
   const t0 = ac.currentTime + 1.2, period = 0.6, n = 12;
   calib = { times:[], taps:[] };
@@ -671,7 +745,6 @@ function startCalibration(){
   drawMenu();
   setTimeout(finishCalibration, (1.2 + n*period + 0.6) * 1000);
 }
-
 function finishCalibration(){
   if (!calib) return;
   const deltas = [];
@@ -686,9 +759,9 @@ function finishCalibration(){
   calib = null;
   if (deltas.length >= 4){
     deltas.sort((a,b) => a-b);
-    const med = deltas[Math.floor(deltas.length/2)];
-    syncOffsetMs = Math.round(Math.max(-300, Math.min(300, -med*1000)));
-    localStorage.setItem('cutline.offset', String(syncOffsetMs));
+    syncOffsetMs = Math.round(Math.max(-300, Math.min(300,
+      -deltas[Math.floor(deltas.length/2)]*1000)));
+    save();
   }
   drawMenu();
 }
@@ -698,7 +771,6 @@ function finishCalibration(){
 let notes = [], nextNote = 0, playing = false, startedAt = 0, source = null;
 let autoPlay = false, pausedAt = 0;
 
-const speed = () => SPEEDS[speedIdx].v;
 const songTime = () => ac ? (ac.currentTime - startedAt) + syncOffsetMs/1000 : 0;
 
 function resetRun(){
@@ -707,7 +779,6 @@ function resetRun(){
   nextNote = 0; score = 0; combo = 0; best = 0; hits = 0; misses = 0;
   drawHud('go');
 }
-
 function makeSource(offsetSec){
   source = ac.createBufferSource();
   source.buffer = songBuf;
@@ -720,24 +791,21 @@ function makeSource(offsetSec){
     if (!playing) return;
     playing = false; songStarted = false;
     drawHud('done — ' + hits + '/' + (hits+misses));
-    openMenu();
+    if (renderer.xr.isPresenting) openMenu();
   };
   playing = true;
 }
-
+function killSource(){ if (source){ try { source.onended = null; source.stop(); } catch(e){} source = null; } }
 function startSong(){ killSource(); resetRun(); songStarted = true; makeSource(0); }
 function pauseSong(){ pausedAt = songTime(); killSource(); playing = false; }
 function resumeSong(){ if (!songStarted) return startSong(); makeSource(pausedAt); }
-function killSource(){
-  if (source){ try { source.onended = null; source.stop(); } catch(e){} source = null; }
-}
 
 const _a = new THREE.Vector3(), _d = new THREE.Vector3(), _wdir = new THREE.Vector3();
 
-function segHitsBox(p0, p1, cx, cy, cz, hx, hy, hz){
+function segHitsBox(p0, p1, cx, cy, cz, h){
   let t0 = 0, t1 = 1;
   const d = _d.copy(p1).sub(p0);
-  const lo = [cx-hx, cy-hy, cz-hz], hi = [cx+hx, cy+hy, cz+hz];
+  const lo = [cx-h, cy-h, cz-h], hi = [cx+h, cy+h, cz+h];
   const o = [p0.x,p0.y,p0.z], dd = [d.x,d.y,d.z];
   for (let i=0;i<3;i++){
     if (Math.abs(dd[i]) < 1e-7){ if (o[i] < lo[i] || o[i] > hi[i]) return false; continue; }
@@ -751,17 +819,15 @@ function segHitsBox(p0, p1, cx, cy, cz, hx, hy, hz){
 }
 
 function registerHit(b, quality, s, dirVec, power){
-  const n = b.note;
-  n.hit = true; combo++; hits++;
+  b.note.hit = true; combo++; hits++;
   if (combo > best) best = combo;
   const mult = combo >= 24 ? 8 : combo >= 12 ? 4 : combo >= 5 ? 2 : 1;
   score += Math.round((70 + 40*quality) * mult);
-  burst(b.grp.position, n.hand ? BLUE : RED, dirVec, power);
+  burst(b.grp.position, b.note.hand ? BLUE : RED, dirVec, power);
   b.grp.visible = false; b.note = null;
   drawHud();
   buzz(s, 0.55, 35);
 }
-
 function registerMiss(b){
   combo = 0; misses++;
   b.grp.visible = false; b.note = null;
@@ -769,26 +835,27 @@ function registerMiss(b){
 }
 
 function checkSabers(dt){
+  const L = LEN(), halfBox = BLOCK*L.box;
   for (const s of sabers){
     if (!s.src) continue;
     saberPoints(s);
     if (!s.hasPrev){ for (let k=0;k<7;k++) s.prev[k].copy(s.pts[k]); s.hasPrev = true; continue; }
     s.vel.copy(s.pts[5]).sub(s.prev[5]).divideScalar(Math.max(dt,1e-4));
     const sp = s.vel.length();
-    if (sp > 1.6){
+    if (sp > L.spd){
       for (const b of blocks){
         if (!b.note || b.note.hand !== s.hand) continue;
         const p = b.grp.position;
         let touched = false;
         for (let k=1;k<7 && !touched;k++)
-          touched = segHitsBox(s.prev[k], s.pts[k], p.x, p.y, p.z, BLOCK*0.62, BLOCK*0.62, BLOCK*0.62);
+          touched = segHitsBox(s.prev[k], s.pts[k], p.x, p.y, p.z, halfBox);
         if (!touched) continue;
         const want = DIRS[b.note.dir];
         _a.set(s.vel.x, s.vel.y, 0).normalize();
         const align = _a.x*want[0] + _a.y*want[1];
-        if (align > 0.45){
+        if (align > L.align){
           _wdir.set(_a.x, _a.y, 0);
-          registerHit(b, Math.min(1,(sp-1.6)/5)*0.5 + align*0.5, s, _wdir, Math.min(1.4, sp/5));
+          registerHit(b, Math.min(1,(sp-L.spd)/5)*0.5 + Math.max(0,align)*0.5, s, _wdir, Math.min(1.4, sp/5));
         }
       }
     }
@@ -798,7 +865,8 @@ function checkSabers(dt){
 
 function tick(dt){
   if (!playing) return;
-  const t = songTime(), v = speed(), lead = 12/v;
+  const t = songTime(), v = speed(), lead = 12/v, L = LEN();
+  const anyDir = L.align < -1;
 
   while (nextNote < notes.length && notes[nextNote].t - t < lead){
     const n = notes[nextNote++];
@@ -809,7 +877,9 @@ function tick(dt){
     const c = n.hand ? BLUE : RED;
     b.body.material.emissive.setHex(c);
     b.halo.material.color.setHex(c);
-    b.arrow.rotation.z = DIR_ANGLE[n.dir];
+    b.arrow.material.map = anyDir ? dotTex : arrowTex;
+    b.arrow.material.needsUpdate = true;
+    b.arrow.rotation.z = anyDir ? 0 : DIR_ANGLE[n.dir];
     b.grp.position.set(COL_X(n.col), ROW_Y(n.row), -12);
     b.grp.visible = true;
   }
@@ -823,13 +893,11 @@ function tick(dt){
     if (autoPlay && b.grp.position.z > -0.25 && !b.note.hit){
       _wdir.set(DIRS[b.note.dir][0], DIRS[b.note.dir][1], 0);
       registerHit(b, 0.8, null, _wdir, 0.9);
-    } else if (b.grp.position.z > 1.4) registerMiss(b);
+    } else if (b.grp.position.z > L.late) registerMiss(b);
   }
 
   if (!autoPlay) checkSabers(dt);
 }
-
-/* ── per-frame button handling ── */
 
 function handleButtons(){
   for (const s of sabers){
@@ -837,20 +905,17 @@ function handleButtons(){
     const gp = s.src.gamepad;
     const trig = !!gp.buttons[0]?.pressed;
     const menuBtn = !!gp.buttons[5]?.pressed;
-
     if (menuBtn && !s.wasMenu && !calib){
-      if (menuOpen) { if (songStarted) resumeSong(); closeMenu(); }
+      if (menuOpen){ if (songStarted) resumeSong(); closeMenu(); }
       else openMenu();
     }
     s.wasMenu = menuBtn;
-
     if (trig && !s.wasTrig){
       if (calib) calib.taps.push(ac.currentTime);
       else if (menuOpen && hoverIdx >= 0) activate(ITEMS[hoverIdx].id, hoverSide, s);
     }
     s.wasTrig = trig;
   }
-
   if (menuOpen && !calib){
     let found = null;
     for (const s of sabers){
@@ -863,8 +928,6 @@ function handleButtons(){
   }
   if (calib && calib.taps.length) drawMenu();
 }
-
-/* ── loop ── */
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
@@ -881,33 +944,29 @@ renderer.setAnimationLoop(() => {
 const $ = id => document.getElementById(id);
 const ui = $('ui'), statusEl = $('status'), prog = $('prog');
 const btnVR = $('btn-vr'), btnPrev = $('btn-preview');
-
 function say(m, warn){ statusEl.textContent = m; statusEl.className = warn ? 'warn' : ''; }
 
-syncOffsetMs = Number(localStorage.getItem('cutline.offset') || 0);
+$('diff').selectedIndex = diffIdx;
+$('speed').selectedIndex = speedIdx;
+$('len').selectedIndex = lenIdx;
 
 function rechart(){
   if (!chart) return;
   notes = buildChart(chart, DIFFS[diffIdx].gap);
   say(`${notes.length} blocks · ~${bpm} BPM · ${Math.round(chart.duration)}s. Ready.`);
 }
-function rechartFromVR(){
+function rechartLive(){
   if (!chart) return;
   notes = buildChart(chart, DIFFS[diffIdx].gap);
   nextNote = 0;
   for (const b of blocks){ b.grp.visible = false; b.note = null; }
-  // skip ahead to where we are
   const t = songTime();
   while (nextNote < notes.length && notes[nextNote].t < t) nextNote++;
 }
 
-$('diff').addEventListener('change', e => {
-  diffIdx = DIFFS.findIndex(d => String(d.gap) === e.target.value);
-  rechart();
-});
-$('speed').addEventListener('change', e => {
-  speedIdx = SPEEDS.findIndex(s => String(s.v) === e.target.value);
-});
+$('diff').addEventListener('change', e => { diffIdx = Number(e.target.value); save(); rechart(); });
+$('speed').addEventListener('change', e => { speedIdx = Number(e.target.value); save(); });
+$('len').addEventListener('change', e => { lenIdx = Number(e.target.value); save(); });
 
 async function loadArrayBuffer(ab, label){
   try{
@@ -935,9 +994,7 @@ $('file').addEventListener('change', async e => {
     const r = await fetch(url);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     await loadArrayBuffer(await r.arrayBuffer(), url);
-  } catch(e){
-    say(`Couldn't auto-load ${url} (${e.message}) — pick a file above.`, true);
-  }
+  } catch(e){ say(`Couldn't auto-load ${url} (${e.message}) — pick a file above.`, true); }
 })();
 
 async function probeXR(){
@@ -966,6 +1023,7 @@ btnVR.addEventListener('click', async () => {
       ui.style.display = 'flex';
       $('diff').selectedIndex = diffIdx;
       $('speed').selectedIndex = speedIdx;
+      $('len').selectedIndex = lenIdx;
       say(`Run over — ${hits} hit, ${misses} missed, best combo ${best}. Offset ${syncOffsetMs} ms.`);
     });
   } catch(err){ say('Could not start: ' + err.message, true); }
@@ -973,7 +1031,7 @@ btnVR.addEventListener('click', async () => {
 
 btnPrev.addEventListener('click', async () => {
   await audioCtx().resume();
-  if (playing){ killSource(); playing = false; btnPrev.textContent = 'Preview on screen'; return; }
+  if (playing){ killSource(); playing = false; return; }
   autoPlay = true; songStarted = true;
   ui.style.display = 'none';
   startSong();
