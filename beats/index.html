@@ -137,11 +137,24 @@ function fft(re, im){
 }
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
-const PERC_BANDS = [ [[35,110]], [[170,330],[1800,5500]], [[7000,13000]] ];
+const PERC_BANDS = [ [[35,110]], [[170,330],[1800,5500]], [[7000,10400]] ];
 const MEL_BAND = [[220, 4200]];
+const ANALYSIS_RATE = 22050;
+
+/* Downmix to mono at half rate before analysis. Nothing above 11 kHz
+   matters for finding drums, and this quarters the work. */
+async function toMono(buf, rate){
+  const len = Math.max(1, Math.ceil(buf.duration * rate));
+  const off = new OfflineAudioContext(1, len, rate);
+  const src = off.createBufferSource();
+  src.buffer = buf;
+  src.connect(off.destination);
+  src.start();
+  return await off.startRendering();
+}
 
 async function analyze(buf, onProgress){
-  const N = 2048, HOP = 512, sr = buf.sampleRate;
+  const N = 1024, HOP = 256, sr = buf.sampleRate;
   const L = buf.getChannelData(0);
   const R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
   const frames = Math.floor((buf.length - N) / HOP);
@@ -170,7 +183,8 @@ async function analyze(buf, onProgress){
     }
     fft(re, im);
     for (let k=0;k<half;k++){
-      const m = Math.hypot(re[k], im[k]);
+      const a = re[k], b = im[k];
+      const m = Math.sqrt(a*a + b*b);   // hypot() is far slower, and we don't need its guards
       const e = ema[k];
       perc[k] = m > e ? m - e : 0;
       ema[k] = e*0.86 + m*0.14;
@@ -186,7 +200,7 @@ async function analyze(buf, onProgress){
       for (let k=lo;k<hi;k++){ const d = ema[k]-prevEma[k]; if (d>0) mflux += d; }
     env[3][f] = mflux;
     prevPerc.set(perc); prevEma.set(ema);
-    if ((f & 255) === 0){ onProgress(f/frames*0.82); await yieldFrame(); }
+    if ((f & 127) === 0){ onProgress(f/frames*0.82); await yieldFrame(); }
   }
 
   for (let b=0;b<4;b++){
@@ -1163,17 +1177,30 @@ $('flop').addEventListener('change', e => {
 });
 
 async function loadArrayBuffer(ab, label){
+  btnVR.disabled = true; btnPrev.disabled = true;
+  prog.style.width = '0%';
   try{
     say('Decoding ' + label + '…');
     songBuf = await audioCtx().decodeAudioData(ab);
-    say('Analyzing — this takes a few seconds…');
-    chart = await analyze(songBuf, p => { prog.style.width = (p*100).toFixed(0)+'%'; });
+
+    say('Preparing audio…');
+    const mono = await toMono(songBuf, ANALYSIS_RATE);
+
+    const t0 = performance.now();
+    chart = await analyze(mono, p => {
+      prog.style.width = (p*100).toFixed(0)+'%';
+      say(`Analyzing ${label} — ${(p*100).toFixed(0)}%`);
+    });
     bpm = chart.bpm;
     prog.style.width = '100%';
+    console.log('analysis took', ((performance.now()-t0)/1000).toFixed(1), 's');
     rechart();
     btnPrev.disabled = false;
     probeXR();
-  } catch(err){ say('Could not load that file: ' + err.message, true); }
+  } catch(err){
+    console.error(err);
+    say('Could not load that file: ' + err.message, true);
+  }
 }
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0];
