@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cutline — WebXR rhythm game</title>
+<style>
+  :root{ --ink:#f0ece6; --dim:#948d85; --bg:#0f1115; --panel:#191c22;
+         --red:#e04a5f; --blue:#3f9fe0; --gold:#c98f3a; }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hidden;
+    font-family:"Inter","Helvetica Neue",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  canvas{display:block}
+  #ui{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;z-index:10}
+  #panel{width:min(600px,100%);max-height:100%;overflow:auto;background:var(--panel);
+    border:1px solid #272b33;border-radius:4px;padding:26px 28px 22px}
+  h1{margin:0 0 3px;font-size:30px;font-weight:600;letter-spacing:-.02em}
+  h1 em{font-style:normal;color:var(--gold)}
+  .sub{margin:0 0 20px;color:var(--dim);font-size:15px;line-height:1.5}
+  .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+  button{font:inherit;font-size:15px;font-weight:500;color:var(--ink);background:#262a32;
+    border:1px solid #343944;border-radius:3px;padding:10px 17px;cursor:pointer;transition:background .12s}
+  button:hover:not(:disabled){background:#2f343d}
+  button:disabled{opacity:.38;cursor:not-allowed}
+  button.primary{background:var(--gold);border-color:var(--gold);color:#1a1508;font-weight:600}
+  button.primary:hover:not(:disabled){background:#daa04b}
+  label{font-size:13px;color:var(--dim);display:block;margin-bottom:5px}
+  select,input[type=file]{font:inherit;font-size:14px;color:var(--ink);background:#262a32;
+    border:1px solid #343944;border-radius:3px;padding:8px 10px;width:100%}
+  input[type=range]{width:100%;accent-color:var(--gold)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+  .bar{height:3px;background:#262a32;border-radius:2px;overflow:hidden;margin:12px 0}
+  .bar i{display:block;height:100%;width:0;background:var(--gold);transition:width .15s}
+  #status{font-size:13px;color:var(--dim);line-height:1.45;min-height:1.3em}
+  #status.warn{color:#d9855a}
+  .hint{font-size:12.5px;color:#6b6862;line-height:1.5;margin-top:16px}
+  code{background:#22262d;padding:1px 5px;border-radius:2px;font-size:12.5px}
+  hr{border:0;border-top:1px solid #272b33;margin:18px 0}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+</head>
+<body>
+
+<div id="ui"><div id="panel">
+  <h1>Cut<em>line</em></h1>
+  <p class="sub">Load a track, and it charts itself — onsets in the low end become low blocks, cymbals and snares go up top. Then you slice them.</p>
+
+  <div class="row" style="flex-direction:column;align-items:stretch;gap:6px">
+    <label for="file">Track</label>
+    <input type="file" id="file" accept="audio/*">
+  </div>
+
+  <div class="grid">
+    <div>
+      <label for="diff">Difficulty</label>
+      <select id="diff">
+        <option value="0.50">Easy</option>
+        <option value="0.33" selected>Normal</option>
+        <option value="0.22">Hard</option>
+        <option value="0.15">Expert</option>
+      </select>
+    </div>
+    <div>
+      <label for="speed">Block speed</label>
+      <select id="speed">
+        <option value="7">Slow</option>
+        <option value="9" selected>Medium</option>
+        <option value="11.5">Fast</option>
+      </select>
+    </div>
+  </div>
+
+  <label for="offset">Audio sync offset: <span id="offval">0</span> ms</label>
+  <input type="range" id="offset" min="-250" max="250" step="5" value="0">
+
+  <div class="bar"><i id="prog"></i></div>
+  <div id="status">Pick an audio file to begin.</div>
+
+  <hr>
+  <div class="row">
+    <button id="btn-vr" class="primary" disabled>Play in VR</button>
+    <button id="btn-preview" disabled>Preview on screen</button>
+  </div>
+
+  <p class="hint">Drop an MP3 named <code>song.mp3</code> next to this file and it loads automatically — no picker needed in the headset. Or add <code>?song=mytrack.mp3</code> to the URL.<br>
+  Slice red blocks with the left saber, blue with the right, following the arrow. Nudge the sync offset if hits feel early or late.</p>
+</div></div>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ══════════════════ audio + analysis ══════════════════ */
+
+let ac = null, songBuf = null, chart = null, bpm = 0;
+
+function audioCtx(){
+  if (!ac) ac = new (window.AudioContext||window.webkitAudioContext)({ latencyHint:'interactive' });
+  return ac;
+}
+
+/* in-place radix-2 FFT */
+function fft(re, im){
+  const n = re.length;
+  for (let i=1, j=0; i<n; i++){
+    let bit = n>>1;
+    for (; j & bit; bit>>=1) j ^= bit;
+    j ^= bit;
+    if (i<j){ let t=re[i];re[i]=re[j];re[j]=t; t=im[i];im[i]=im[j];im[j]=t; }
+  }
+  for (let len=2; len<=n; len<<=1){
+    const ang = -2*Math.PI/len, wr = Math.cos(ang), wi = Math.sin(ang), h = len>>1;
+    for (let i=0;i<n;i+=len){
+      let cr=1, ci=0;
+      for (let k=0;k<h;k++){
+        const ar=re[i+k], ai=im[i+k];
+        const br=re[i+k+h]*cr - im[i+k+h]*ci;
+        const bi=re[i+k+h]*ci + im[i+k+h]*cr;
+        re[i+k]=ar+br; im[i+k]=ai+bi;
+        re[i+k+h]=ar-br; im[i+k+h]=ai-bi;
+        const ncr = cr*wr - ci*wi; ci = cr*wi + ci*wr; cr = ncr;
+      }
+    }
+  }
+}
+
+const yieldFrame = () => new Promise(r => setTimeout(r, 0));
+
+/* Spectral-flux onset detection in three bands. */
+async function analyze(buf, onProgress){
+  const N = 2048, HOP = 512, sr = buf.sampleRate;
+  const chans = buf.numberOfChannels;
+  const L = buf.getChannelData(0);
+  const R = chans > 1 ? buf.getChannelData(1) : null;
+  const total = buf.length;
+  const frames = Math.floor((total - N) / HOP);
+
+  const win = new Float32Array(N);
+  for (let i=0;i<N;i++) win[i] = 0.5 - 0.5*Math.cos(2*Math.PI*i/(N-1));
+
+  const binHz = sr / N;
+  const bands = [
+    { lo: Math.max(1, Math.floor(30/binHz)),   hi: Math.floor(190/binHz)  },  // kick
+    { lo: Math.floor(190/binHz),               hi: Math.floor(2200/binHz) },  // body
+    { lo: Math.floor(2200/binHz),              hi: Math.min(N>>1, Math.floor(11000/binHz)) }, // hats
+  ];
+
+  const env = bands.map(() => new Float32Array(frames));
+  const prevMag = new Float32Array(N>>1);
+  const re = new Float32Array(N), im = new Float32Array(N);
+
+  for (let f=0; f<frames; f++){
+    const off = f*HOP;
+    for (let i=0;i<N;i++){
+      const s = R ? (L[off+i]+R[off+i])*0.5 : L[off+i];
+      re[i] = s*win[i]; im[i] = 0;
+    }
+    fft(re, im);
+    for (let b=0;b<3;b++){
+      let flux = 0;
+      for (let k=bands[b].lo;k<bands[b].hi;k++){
+        const mag = Math.hypot(re[k], im[k]);
+        const d = mag - prevMag[k];
+        if (d > 0) flux += d;
+      }
+      env[b][f] = flux;
+    }
+    for (let k=0;k<(N>>1);k++) prevMag[k] = Math.hypot(re[k], im[k]);
+
+    if ((f & 255) === 0){ onProgress(f/frames * 0.85); await yieldFrame(); }
+  }
+
+  // normalize each band
+  for (let b=0;b<3;b++){
+    let mx = 0;
+    for (let f=0;f<frames;f++) if (env[b][f] > mx) mx = env[b][f];
+    if (mx > 0) for (let f=0;f<frames;f++) env[b][f] /= mx;
+  }
+
+  // tempo: autocorrelate the summed envelope
+  const sum = new Float32Array(frames);
+  for (let f=0;f<frames;f++) sum[f] = env[0][f]*1.3 + env[1][f] + env[2][f]*0.8;
+  const fps = sr / HOP;
+  let bestLag = 0, bestVal = -1;
+  for (let lag = Math.floor(fps*0.30); lag < Math.floor(fps*1.05); lag++){
+    let acc = 0;
+    for (let f=0; f+lag<frames; f++) acc += sum[f]*sum[f+lag];
+    acc /= (frames - lag);
+    if (acc > bestVal){ bestVal = acc; bestLag = lag; }
+  }
+  let beat = bestLag / fps;
+  while (beat > 0.75) beat /= 2;          // fold into 80–200 BPM
+  while (beat < 0.30) beat *= 2;
+  const estBpm = Math.round(60 / beat);
+  onProgress(0.92); await yieldFrame();
+
+  // peak-pick each band with an adaptive threshold
+  const W = 22, onsets = [];
+  for (let b=0;b<3;b++){
+    const e = env[b];
+    for (let f=2; f<frames-2; f++){
+      const v = e[f];
+      if (v < 0.035) continue;
+      if (v < e[f-1] || v < e[f+1] || v < e[f-2] || v < e[f+2]) continue;
+      let mean = 0, n = 0;
+      for (let k=Math.max(0,f-W); k<Math.min(frames,f+W); k++){ mean += e[k]; n++; }
+      mean /= n;
+      if (v < mean*1.65 + 0.02) continue;
+      onsets.push({ t: f*HOP/sr, band:b, strength: Math.min(1, v/(mean*3+0.05)) });
+    }
+  }
+  onsets.sort((a,b) => a.t - b.t);
+
+  onProgress(1);
+  return { onsets, bpm: estBpm, beat, duration: buf.duration };
+}
+
+/* ══════════════════ chart generation ══════════════════ */
+
+const DIRS = {               // name -> [dx, dy] of the slice travel, + arrow angle
+  up:    [ 0, 1], down:  [ 0,-1], left: [-1, 0], right:[ 1, 0],
+  upL:   [-0.7071, 0.7071], upR:[0.7071,0.7071],
+  dnL:   [-0.7071,-0.7071], dnR:[0.7071,-0.7071],
+};
+const DIR_ANGLE = { up:0, upR:-Math.PI/4, right:-Math.PI/2, dnR:-3*Math.PI/4,
+                    down:Math.PI, dnL:3*Math.PI/4, left:Math.PI/2, upL:Math.PI/4 };
+
+function buildChart(analysis, minGap){
+  const { onsets, beat } = analysis;
+  const notes = [];
+  let lastT = -99, hand = 0, lastCol = [1, 2];
+
+  // quantize to 1/4 beat when the onset is close to the grid
+  const q = beat / 4;
+  const snap = t => { const g = Math.round(t/q)*q; return Math.abs(g-t) < 0.055 ? g : t; };
+
+  for (const o of onsets){
+    const t = snap(o.t);
+    if (t - lastT < minGap) continue;
+    if (t < 1.6) continue;                       // leave room for the first jump
+    lastT = t;
+
+    const row = o.band;                          // 0 low, 1 mid, 2 high
+    hand ^= 1;                                   // alternate hands
+    const h = hand;                              // 0 = left/red, 1 = right/blue
+
+    // keep each hand on its own side, drifting one column at a time
+    const base = h ? 2 : 1;
+    let col = base + (Math.random() < 0.45 ? (h ? 1 : -1) : 0);
+    if (col === lastCol[h] && Math.random() < 0.6) col = base;
+    col = Math.max(0, Math.min(3, col));
+    lastCol[h] = col;
+
+    let dir;
+    if (row === 0) dir = Math.random() < 0.75 ? 'up' : (h ? 'upR' : 'upL');
+    else if (row === 2) dir = Math.random() < 0.7 ? 'down' : (h ? 'dnR' : 'dnL');
+    else dir = h ? 'left' : 'right';             // middle row: cut across the body
+
+    notes.push({ t, col, row, hand: h, dir, strength: o.strength, hit:false, spawned:false });
+  }
+  return notes;
+}
+
+/* ══════════════════ scene ══════════════════ */
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070a0f);
+scene.fog = new THREE.Fog(0x070a0f, 9, 20);
+
+const camera = new THREE.PerspectiveCamera(68, innerWidth/innerHeight, 0.01, 60);
+camera.position.set(0, 1.5, 0.9);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setFoveation(0.5);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0x8fb4ff, 0x120e18, 1.0));
+const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(1,3,2); scene.add(key);
+
+// runway
+const grid = new THREE.GridHelper(6, 12, 0x2a3a52, 0x16202e);
+grid.position.z = -8; grid.scale.z = 4;
+grid.material.transparent = true; grid.material.opacity = 0.55;
+scene.add(grid);
+
+for (const side of [-1, 1]){
+  const rail = new THREE.Mesh(
+    new THREE.BoxGeometry(0.03, 0.03, 24),
+    new THREE.MeshStandardMaterial({ color:0x2c4a6e, emissive:0x1e3d63, emissiveIntensity:0.8 }));
+  rail.position.set(side*1.15, 0.02, -10);
+  scene.add(rail);
+}
+
+/* ── block pool ── */
+const COL_X = c => (c - 1.5) * 0.45;
+const ROW_Y = r => 0.88 + r * 0.42;
+const BLOCK = 0.26;
+
+function arrowTexture(){
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffffff';
+  g.beginPath(); g.moveTo(64,22); g.lineTo(98,66); g.lineTo(76,66);
+  g.lineTo(76,104); g.lineTo(52,104); g.lineTo(52,66); g.lineTo(30,66);
+  g.closePath(); g.fill();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const arrowTex = arrowTexture();
+
+const POOL = 48;
+const blocks = [];
+const blockGeo = new THREE.BoxGeometry(BLOCK, BLOCK, BLOCK);
+const arrowGeo = new THREE.PlaneGeometry(BLOCK*0.62, BLOCK*0.62);
+
+for (let i=0;i<POOL;i++){
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(blockGeo, new THREE.MeshStandardMaterial({
+    color:0xe04a5f, emissive:0x000000, roughness:0.35, metalness:0.1 }));
+  g.add(body);
+  const arrow = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({
+    map:arrowTex, transparent:true, depthWrite:false }));
+  arrow.position.z = BLOCK/2 + 0.002;
+  g.add(arrow);
+  g.visible = false;
+  scene.add(g);
+  blocks.push({ grp:g, body, arrow, note:null });
+}
+
+const RED = 0xe04a5f, BLUE = 0x3f9fe0;
+
+/* ── sabers ── */
+const BLADE = 0.95;
+const sabers = [];
+for (let i=0;i<2;i++){
+  const c = renderer.xr.getController(i);
+  scene.add(c);
+  const color = i === 0 ? RED : BLUE;
+  const blade = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.014, 0.011, BLADE, 10),
+    new THREE.MeshStandardMaterial({ color, emissive:color, emissiveIntensity:1.4, roughness:0.3 }));
+  blade.rotation.x = -Math.PI/2;
+  blade.position.z = -BLADE/2 - 0.06;
+  c.add(blade);
+  const hilt = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.019, 0.019, 0.11, 10),
+    new THREE.MeshStandardMaterial({ color:0x2a2f38, roughness:0.6 }));
+  hilt.rotation.x = -Math.PI/2; hilt.position.z = -0.02;
+  c.add(hilt);
+
+  const s = { ctrl:c, hand:i, src:null,
+              pts:[], prev:[], vel:new THREE.Vector3(), hasPrev:false };
+  c.addEventListener('connected', e => { s.src = e.data; });
+  c.addEventListener('disconnected', () => { s.src = null; s.hasPrev = false; });
+  for (let k=0;k<7;k++){ s.pts.push(new THREE.Vector3()); s.prev.push(new THREE.Vector3()); }
+  sabers.push(s);
+}
+
+function saberPoints(s){
+  for (let k=0;k<7;k++){
+    const z = -0.06 - (BLADE * k / 6);
+    s.pts[k].set(0, 0, z).applyMatrix4(s.ctrl.matrixWorld);
+  }
+}
+
+/* ── HUD ── */
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 512; hudCanvas.height = 160;
+const hudCtx = hudCanvas.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+hudTex.colorSpace = THREE.SRGBColorSpace;
+const hud = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.1, 0.34),
+  new THREE.MeshBasicMaterial({ map:hudTex, transparent:true }));
+hud.position.set(0, 2.25, -3.2);
+scene.add(hud);
+
+let score = 0, combo = 0, best = 0, hits = 0, misses = 0;
+
+function drawHud(msg){
+  const g = hudCtx;
+  g.clearRect(0,0,512,160);
+  g.textAlign = 'center';
+  g.fillStyle = '#f0ece6';
+  g.font = '600 64px Inter, Helvetica, Arial';
+  g.fillText(score.toLocaleString(), 256, 62);
+  g.font = '500 30px Inter, Helvetica, Arial';
+  g.fillStyle = combo > 0 ? '#c98f3a' : '#6b6862';
+  g.fillText(combo > 0 ? combo + 'x combo' : (msg || '—'), 256, 108);
+  g.font = '400 22px Inter, Helvetica, Arial';
+  g.fillStyle = '#7d8691';
+  g.fillText(hits + ' hit · ' + misses + ' missed', 256, 144);
+  hudTex.needsUpdate = true;
+}
+drawHud('ready');
+
+/* ══════════════════ gameplay ══════════════════ */
+
+let notes = [], nextNote = 0, playing = false, startedAt = 0, source = null;
+let speed = 9, syncOffset = 0, autoPlay = false;
+
+const songTime = () => ac ? (ac.currentTime - startedAt) + syncOffset : 0;
+
+function resetRun(){
+  for (const b of blocks){ b.grp.visible = false; b.note = null; }
+  for (const n of notes){ n.hit = false; n.spawned = false; }
+  nextNote = 0; score = 0; combo = 0; best = 0; hits = 0; misses = 0;
+  drawHud('go');
+}
+
+function startSong(){
+  resetRun();
+  source = ac.createBufferSource();
+  source.buffer = songBuf;
+  const g = ac.createGain(); g.gain.value = 0.85;
+  source.connect(g).connect(ac.destination);
+  startedAt = ac.currentTime + 0.12;
+  source.start(startedAt);
+  source.onended = () => { playing = false; drawHud('done — ' + hits + '/' + (hits+misses)); };
+  playing = true;
+}
+
+function stopSong(){
+  if (source){ try { source.onended = null; source.stop(); } catch(e){} source = null; }
+  playing = false;
+}
+
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _d = new THREE.Vector3();
+
+/* segment vs axis-aligned box */
+function segHitsBox(p0, p1, cx, cy, cz, hx, hy, hz){
+  let t0 = 0, t1 = 1;
+  const d = _d.copy(p1).sub(p0);
+  const lo = [cx-hx, cy-hy, cz-hz], hi = [cx+hx, cy+hy, cz+hz];
+  const o = [p0.x, p0.y, p0.z], dd = [d.x, d.y, d.z];
+  for (let i=0;i<3;i++){
+    if (Math.abs(dd[i]) < 1e-7){ if (o[i] < lo[i] || o[i] > hi[i]) return false; continue; }
+    let a = (lo[i]-o[i])/dd[i], b = (hi[i]-o[i])/dd[i];
+    if (a > b){ const t = a; a = b; b = t; }
+    if (a > t0) t0 = a;
+    if (b < t1) t1 = b;
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
+function registerHit(b, quality, s){
+  const n = b.note;
+  n.hit = true;
+  combo++; hits++;
+  if (combo > best) best = combo;
+  const mult = combo >= 24 ? 8 : combo >= 12 ? 4 : combo >= 5 ? 2 : 1;
+  score += Math.round((70 + 40*quality) * mult);
+  b.grp.visible = false; b.note = null;
+  drawHud();
+  const act = s?.src?.gamepad?.hapticActuators?.[0];
+  if (act?.pulse){ try { act.pulse(0.55, 35); } catch(e){} }
+}
+
+function registerMiss(b){
+  combo = 0; misses++;
+  b.grp.visible = false; b.note = null;
+  drawHud('miss');
+}
+
+function checkSabers(dt){
+  for (const s of sabers){
+    if (!s.src) continue;
+    saberPoints(s);
+    if (!s.hasPrev){ for (let k=0;k<7;k++) s.prev[k].copy(s.pts[k]); s.hasPrev = true; continue; }
+
+    s.vel.copy(s.pts[5]).sub(s.prev[5]).divideScalar(Math.max(dt, 1e-4));
+    const sp = s.vel.length();
+
+    if (sp > 1.6){
+      for (const b of blocks){
+        if (!b.note || b.note.hand !== s.hand) continue;
+        const p = b.grp.position;
+        let touched = false;
+        for (let k=1;k<7 && !touched;k++)
+          touched = segHitsBox(s.prev[k], s.pts[k], p.x, p.y, p.z,
+                               BLOCK*0.62, BLOCK*0.62, BLOCK*0.62);
+        if (!touched) continue;
+
+        const want = DIRS[b.note.dir];
+        _a.set(s.vel.x, s.vel.y, 0).normalize();
+        const align = _a.x*want[0] + _a.y*want[1];
+        if (align > 0.45) registerHit(b, Math.min(1, (sp-1.6)/5) * 0.5 + align*0.5, s);
+      }
+    }
+    for (let k=0;k<7;k++) s.prev[k].copy(s.pts[k]);
+  }
+}
+
+function tick(dt){
+  if (!playing) return;
+  const t = songTime();
+  const lead = 12 / speed;
+
+  while (nextNote < notes.length && notes[nextNote].t - t < lead){
+    const n = notes[nextNote++];
+    if (n.spawned || n.t < t) continue;
+    const b = blocks.find(x => !x.note);
+    if (b){
+      n.spawned = true;
+      b.note = n;
+      b.body.material.color.setHex(n.hand ? BLUE : RED);
+      b.body.material.emissive.setHex(n.hand ? 0x3a0e14 : 0x0b2436);
+      b.arrow.rotation.z = DIR_ANGLE[n.dir];
+      b.grp.position.set(COL_X(n.col), ROW_Y(n.row), -12);
+      b.grp.visible = true;
+    }
+  }
+
+  for (const b of blocks){
+    if (!b.note) continue;
+    b.grp.position.z = (t - b.note.t) * speed;
+    b.grp.rotation.z = Math.sin((b.note.t + t) * 2) * 0.05;
+
+    if (autoPlay && b.grp.position.z > -0.25 && !b.note.hit) registerHit(b, 0.8, null);
+    else if (b.grp.position.z > 1.4) registerMiss(b);
+  }
+
+  if (!autoPlay) checkSabers(dt);
+}
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  tick(dt);
+  if (!renderer.xr.isPresenting) hud.lookAt(camera.position);
+  renderer.render(scene, camera);
+});
+
+/* ══════════════════ UI wiring ══════════════════ */
+
+const $ = id => document.getElementById(id);
+const ui = $('ui'), statusEl = $('status'), prog = $('prog');
+const btnVR = $('btn-vr'), btnPrev = $('btn-preview');
+
+function say(m, warn){ statusEl.textContent = m; statusEl.className = warn ? 'warn' : ''; }
+
+const savedOffset = Number(localStorage.getItem('cutline.offset') || 0);
+$('offset').value = savedOffset; $('offval').textContent = savedOffset;
+syncOffset = savedOffset / 1000;
+$('offset').addEventListener('input', e => {
+  const v = Number(e.target.value);
+  $('offval').textContent = v;
+  syncOffset = v / 1000;
+  localStorage.setItem('cutline.offset', String(v));
+});
+
+function rechart(){
+  if (!chart) return;
+  notes = buildChart(chart, Number($('diff').value));
+  speed = Number($('speed').value);
+  say(`${notes.length} blocks · ~${bpm} BPM · ${Math.round(chart.duration)}s. Ready.`);
+}
+$('diff').addEventListener('change', rechart);
+$('speed').addEventListener('change', rechart);
+
+async function loadArrayBuffer(ab, label){
+  try{
+    say('Decoding ' + label + '…');
+    songBuf = await audioCtx().decodeAudioData(ab);
+    say('Analyzing — this takes a few seconds…');
+    chart = await analyze(songBuf, p => { prog.style.width = (p*100).toFixed(0) + '%'; });
+    bpm = chart.bpm;
+    prog.style.width = '100%';
+    rechart();
+    btnPrev.disabled = false;
+    probeXR();
+  } catch(err){
+    say('Could not load that file: ' + err.message, true);
+  }
+}
+
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  await loadArrayBuffer(await f.arrayBuffer(), f.name);
+});
+
+// auto-load song.mp3 (or ?song=…) sitting next to this page
+(async () => {
+  const param = new URLSearchParams(location.search).get('song');
+  const url = param || 'song.mp3';
+  try{
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('not found');
+    await loadArrayBuffer(await r.arrayBuffer(), url);
+  } catch(e){
+    if (param) say('Could not find ' + param + ' — use the picker instead.', true);
+  }
+})();
+
+async function probeXR(){
+  if (!navigator.xr){
+    say(isSecureContext ? 'No WebXR here — preview mode still works.'
+                        : 'WebXR needs HTTPS. Serve this page securely.', true);
+    return;
+  }
+  const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
+  btnVR.disabled = !ok || !chart;
+}
+probeXR();
+
+btnVR.addEventListener('click', async () => {
+  await audioCtx().resume();
+  try{
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures:['local-floor'] });
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(session);
+    ui.style.display = 'none';
+    autoPlay = false;
+    hud.position.set(0, 2.25, -3.2);
+    hud.rotation.set(0,0,0);
+    setTimeout(startSong, 900);
+    session.addEventListener('end', () => {
+      stopSong();
+      ui.style.display = 'flex';
+      for (const s of sabers) s.hasPrev = false;
+      say(`Run over — ${hits} hit, ${misses} missed, best combo ${best}.`);
+    });
+  } catch(err){ say('Could not start: ' + err.message, true); }
+});
+
+btnPrev.addEventListener('click', async () => {
+  await audioCtx().resume();
+  if (playing){ stopSong(); btnPrev.textContent = 'Preview on screen'; return; }
+  autoPlay = true;
+  ui.style.display = 'none';
+  startSong();
+  const stop = e => {
+    if (e.key !== 'Escape') return;
+    stopSong(); autoPlay = false; ui.style.display = 'flex';
+    removeEventListener('keydown', stop);
+    say('Preview stopped.');
+  };
+  addEventListener('keydown', stop);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
