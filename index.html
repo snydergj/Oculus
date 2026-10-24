@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VR</title>
+<style>
+  :root{ --ink:#eef2f7; --dim:#8b93a0; --bg:#07080c; --card:#12151c;
+         --line:#1e2430; --blue:#15d6ff; --gold:#ffc24a; }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Helvetica Neue",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  body{display:flex;justify-content:center;padding:48px 20px 64px}
+  main{width:min(620px,100%)}
+  h1{margin:0 0 6px;font-size:34px;font-weight:600;letter-spacing:-.025em}
+  .tag{margin:0 0 36px;color:var(--dim);font-size:15px}
+  a.card{display:block;text-decoration:none;color:inherit;background:var(--card);
+    border:1px solid var(--line);border-radius:4px;padding:20px 22px;margin-bottom:12px;
+    transition:border-color .14s, background .14s}
+  a.card:hover{border-color:#2d5f78;background:#161a22}
+  a.card h2{margin:0 0 4px;font-size:20px;font-weight:600}
+  a.card p{margin:0;color:var(--dim);font-size:14px;line-height:1.45}
+  h3{font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+    color:#5f6774;margin:34px 0 12px}
+  ul{list-style:none;margin:0;padding:0}
+  li a{display:flex;align-items:center;gap:12px;text-decoration:none;color:var(--ink);
+    padding:13px 16px;border:1px solid var(--line);border-radius:3px;margin-bottom:8px;
+    font-size:15px;transition:border-color .14s,background .14s}
+  li a:hover{border-color:#2d5f78;background:#12151c}
+  li a span.note{color:var(--gold);font-size:13px}
+  li a span.name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .msg{color:#5f6774;font-size:13.5px;line-height:1.55}
+  code{background:#161a22;padding:2px 6px;border-radius:2px;font-size:13px;color:#a9b4c2}
+  footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--line);
+    color:#4d5664;font-size:12.5px;line-height:1.6}
+</style>
+</head>
+<body>
+<main>
+  <h1>VR</h1>
+  <p class="tag">WebXR things. Open on the headset.</p>
+
+  <a class="card" href="beats/">
+    <h2>Cutline</h2>
+    <p>Rhythm game that charts itself from whatever track you give it.</p>
+  </a>
+
+  <a class="card" href="drums/">
+    <h2>Room Kit</h2>
+    <p>A drum kit you place in your room and play with the controllers.</p>
+  </a>
+
+  <h3>Tracks</h3>
+  <ul id="songs"></ul>
+  <p class="msg" id="msg">Looking for songs…</p>
+
+  <footer>
+    Drop an MP3 into the <code>beats/</code> folder and it shows up here.
+    The one named <code>song.mp3</code> is what loads by default.
+  </footer>
+</main>
+
+<script>
+const REPO = 'snydergj/Oculus';
+const BRANCH = 'main';
+const FOLDER = 'beats';
+const AUDIO = /\.(mp3|ogg|wav|m4a|flac|opus|aac)$/i;
+
+const list = document.getElementById('songs');
+const msg  = document.getElementById('msg');
+
+(async () => {
+  try{
+    const r = await fetch(`https://api.github.com/repos/${REPO}/contents/${FOLDER}?ref=${BRANCH}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const files = (await r.json()).filter(f => f.type === 'file' && AUDIO.test(f.name));
+
+    if (!files.length){
+      msg.textContent = `No audio files in ${FOLDER}/ yet.`;
+      return;
+    }
+
+    files.sort((a,b) => a.name.localeCompare(b.name));
+    for (const f of files){
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = `${FOLDER}/?song=${encodeURIComponent(f.name)}`;
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = f.name.replace(AUDIO, '').replace(/[_-]+/g, ' ');
+      a.appendChild(name);
+      const size = document.createElement('span');
+      size.className = 'note';
+      size.textContent = (f.size/1048576).toFixed(1) + ' MB';
+      a.appendChild(size);
+      li.appendChild(a);
+      list.appendChild(li);
+    }
+    msg.remove();
+  } catch(e){
+    msg.innerHTML = `Couldn't read the <code>${FOLDER}/</code> folder (${e.message}).<br>
+      You can still open a track directly: <code>${FOLDER}/?song=yourfile.mp3</code>`;
+  }
+})();
+</script>
+</body>
+</html>
