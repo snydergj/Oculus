@@ -101,8 +101,26 @@
   In the headset: <strong>B or Y</strong> opens the menu. Run <strong>Timing test</strong> first — it watches where you actually slice and sets the offset for you.</p>
 </div></div>
 
+<script>
+/* Headset debugging aid: there's no console in the Quest browser, so surface
+   startup failures on the page itself. */
+window.__booted = false;
+function __fail(text){
+  const el = document.getElementById('status');
+  if (el){ el.className = 'warn'; el.textContent = text; }
+}
+addEventListener('error', e => {
+  __fail('Script error: ' + (e.message || (e.error && e.error.message) || 'unknown'));
+});
+setTimeout(() => {
+  if (!window.__booted)
+    __fail('The app script never started — three.js may not have loaded from the CDN.');
+}, 10000);
+</script>
+
 <script type="module">
 import * as THREE from 'three';
+window.__booted = true;
 
 /* ══════════════════ audio + analysis ══════════════════ */
 
@@ -666,6 +684,11 @@ function buzz(s, i, ms){
   if (a?.pulse){ try { a.pulse(i, ms); } catch(e){} }
 }
 
+/* UI + run state. These must be declared before anything that reads them —
+   drawHud() runs during startup and checks `test`. */
+let menuOpen = false, hoverIdx = -1, hoverSide = 0, songStarted = false;
+let menuMode = 'main', test = null, testResult = null;
+
 /* ── HUD ── */
 const hudCanvas = document.createElement('canvas');
 hudCanvas.width = 512; hudCanvas.height = 170;
@@ -741,8 +764,6 @@ const MAIN = [
 ];
 let RESULT = [];
 
-let menuOpen = false, hoverIdx = -1, hoverSide = 0, songStarted = false;
-let menuMode = 'main', test = null, testResult = null;
 const items = () => menuMode === 'result' ? RESULT : MAIN;
 
 function drawMenu(){
