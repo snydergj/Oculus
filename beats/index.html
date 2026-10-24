@@ -27,7 +27,9 @@
   label{font-size:13px;color:var(--dim);display:block;margin-bottom:5px}
   select,input[type=file]{font:inherit;font-size:14px;color:var(--ink);background:#1b202a;
     border:1px solid #28303d;border-radius:3px;padding:8px 10px;width:100%}
-  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:18px}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px}
+  .check{display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dim);margin-bottom:16px;cursor:pointer}
+  .check input{accent-color:var(--blue);width:17px;height:17px}
   .bar{height:3px;background:#1b202a;border-radius:2px;overflow:hidden;margin:12px 0}
   .bar i{display:block;height:100%;width:0;background:var(--blue);transition:width .15s}
   #status{font-size:13px;color:var(--dim);line-height:1.45;min-height:1.3em}
@@ -35,7 +37,7 @@
   .hint{font-size:12.5px;color:#5f6774;line-height:1.5;margin-top:16px}
   code{background:#1b202a;padding:1px 5px;border-radius:2px;font-size:12.5px}
   hr{border:0;border-top:1px solid #1e2430;margin:18px 0}
-  .legend{font-size:12.5px;color:#5f6774;line-height:1.6;margin:-8px 0 16px}
+  .legend{font-size:12.5px;color:#5f6774;line-height:1.6;margin:-4px 0 14px}
   .legend b{color:#8b93a0;font-weight:600}
 </style>
 <script type="importmap">
@@ -57,30 +59,27 @@
     <div>
       <label for="diff">Difficulty</label>
       <select id="diff">
-        <option value="0">Easy</option>
-        <option value="1" selected>Normal</option>
-        <option value="2">Hard</option>
-        <option value="3">Expert</option>
+        <option value="0">Easy</option><option value="1" selected>Normal</option>
+        <option value="2">Hard</option><option value="3">Expert</option>
       </select>
     </div>
     <div>
       <label for="speed">Speed</label>
       <select id="speed">
-        <option value="0">Slow</option>
-        <option value="1" selected>Medium</option>
+        <option value="0">Slow</option><option value="1" selected>Medium</option>
         <option value="2">Fast</option>
       </select>
     </div>
     <div>
       <label for="len">Hit window</label>
       <select id="len">
-        <option value="0">Strict</option>
-        <option value="1">Normal</option>
-        <option value="2" selected>Forgiving</option>
-        <option value="3">Any direction</option>
+        <option value="0">Strict</option><option value="1">Normal</option>
+        <option value="2" selected>Forgiving</option><option value="3">Any direction</option>
       </select>
     </div>
   </div>
+
+  <label class="check"><input type="checkbox" id="flop"> Flaccid mode — rubber sabers that flop and whip</label>
 
   <p class="legend">
     <b>Easy</b> — kick and snare only, locked to the quarter note.<br>
@@ -138,13 +137,7 @@ function fft(re, im){
 }
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
-/* Band 0 kick · 1 snare · 2 hats — all read from the percussive residue.
-   Band 3 is melodic, read from the sustained component instead. */
-const PERC_BANDS = [
-  [[35, 110]],
-  [[170, 330], [1800, 5500]],
-  [[7000, 13000]],
-];
+const PERC_BANDS = [ [[35,110]], [[170,330],[1800,5500]], [[7000,13000]] ];
 const MEL_BAND = [[220, 4200]];
 
 async function analyze(buf, onProgress){
@@ -176,32 +169,24 @@ async function analyze(buf, onProgress){
       re[i] = s*win[i]; im[i] = 0;
     }
     fft(re, im);
-
-    /* Split each bin into sustained (slow average) and transient (what rises
-       above it). Vocals, guitar sustain and bass notes live in the first;
-       drum attacks live in the second. */
     for (let k=0;k<half;k++){
       const m = Math.hypot(re[k], im[k]);
       const e = ema[k];
       perc[k] = m > e ? m - e : 0;
       ema[k] = e*0.86 + m*0.14;
     }
-
     for (let b=0;b<3;b++){
       let flux = 0;
       for (const [lo,hi] of percRanges[b])
-        for (let k=lo;k<hi;k++){ const d = perc[k] - prevPerc[k]; if (d > 0) flux += d; }
+        for (let k=lo;k<hi;k++){ const d = perc[k]-prevPerc[k]; if (d>0) flux += d; }
       env[b][f] = flux;
     }
-    /* melodic: new notes show up as the sustained floor stepping up */
     let mflux = 0;
     for (const [lo,hi] of melRange)
-      for (let k=lo;k<hi;k++){ const d = ema[k] - prevEma[k]; if (d > 0) mflux += d; }
+      for (let k=lo;k<hi;k++){ const d = ema[k]-prevEma[k]; if (d>0) mflux += d; }
     env[3][f] = mflux;
-
-    prevPerc.set(perc);
-    prevEma.set(ema);
-    if ((f & 255) === 0){ onProgress(f/frames * 0.82); await yieldFrame(); }
+    prevPerc.set(perc); prevEma.set(ema);
+    if ((f & 255) === 0){ onProgress(f/frames*0.82); await yieldFrame(); }
   }
 
   for (let b=0;b<4;b++){
@@ -221,14 +206,13 @@ async function analyze(buf, onProgress){
     acc /= (frames - lag);
     if (acc > bestVal){ bestVal = acc; bestLag = lag; }
   }
-  let beat = bestLag / fps;
+  let beat = bestLag/fps;
   while (beat > 0.75) beat /= 2;
   while (beat < 0.30) beat *= 2;
 
   let phase = 0, phScore = -1;
-  const PH = 96;
-  for (let p=0;p<PH;p++){
-    const ph = p/PH*beat;
+  for (let p=0;p<96;p++){
+    const ph = p/96*beat;
     let sc = 0;
     for (let t=ph; t*fps < frames; t += beat) sc += sum[Math.round(t*fps)] || 0;
     if (sc > phScore){ phScore = sc; phase = ph; }
@@ -237,8 +221,7 @@ async function analyze(buf, onProgress){
 
   const W = 20, onsets = [];
   for (let b=0;b<4;b++){
-    const e = env[b];
-    const thresh = b === 3 ? 1.9 : 1.55;
+    const e = env[b], thresh = b === 3 ? 1.9 : 1.55;
     for (let f=2; f<frames-2; f++){
       const v = e[f];
       if (v < 0.03) continue;
@@ -265,7 +248,6 @@ const DIFFS = [
   { name:'Hard',   bands:[0,1,2,3], div:4, forceGrid:false, gap:0.20, melKeep:0.35},
   { name:'Expert', bands:[0,1,2,3], div:8, forceGrid:false, gap:0.13, melKeep:1   },
 ];
-
 const DIRS = { up:[0,1], down:[0,-1], left:[-1,0], right:[1,0],
   upL:[-0.7071,0.7071], upR:[0.7071,0.7071], dnL:[-0.7071,-0.7071], dnR:[0.7071,-0.7071] };
 const DIR_ANGLE = { up:0, upR:-Math.PI/4, right:-Math.PI/2, dnR:-3*Math.PI/4,
@@ -278,7 +260,6 @@ function buildChart(a, dIdx){
   let pool = onsets.filter(o => D.bands.includes(o.band));
 
   if (D.forceGrid){
-    /* Easy: at most one block per quarter note, and it sits exactly on it. */
     const bucket = new Map();
     for (const o of pool){
       const idx = Math.round((o.t - phase)/step);
@@ -293,7 +274,7 @@ function buildChart(a, dIdx){
     pool = pool.map(o => {
       const gt = phase + Math.round((o.t - phase)/step)*step;
       const on = Math.abs(gt - o.t) < 0.05;
-      return { t: on ? gt : o.t, band:o.band, strength: o.strength*(on ? 1.3 : 1) };
+      return { t: on ? gt : o.t, band:o.band, strength: o.strength*(on?1.3:1) };
     });
   }
 
@@ -314,7 +295,7 @@ function buildChart(a, dIdx){
   }
   kept.sort((x,y) => x.t - y.t);
 
-  const ROW_OF = [0, 1, 2, 1];
+  const ROW_OF = [0,1,2,1];
   const notes = [];
   let hand = 0, lastCol = [1,2];
   for (const o of kept){
@@ -322,17 +303,17 @@ function buildChart(a, dIdx){
     hand ^= 1;
     const h = hand;
     let col;
-    if (o.band === 3) col = h ? 3 : 0;            // melodic sits wide
+    if (o.band === 3) col = h ? 3 : 0;
     else {
       const base = h ? 2 : 1;
-      col = base + (Math.random() < 0.45 ? (h ? 1 : -1) : 0);
+      col = base + (Math.random() < 0.45 ? (h?1:-1) : 0);
       if (col === lastCol[h] && Math.random() < 0.6) col = base;
       col = Math.max(0, Math.min(3, col));
     }
     lastCol[h] = col;
     let dir;
-    if (o.band === 0) dir = Math.random() < 0.8 ? 'up' : (h ? 'upR' : 'upL');
-    else if (o.band === 2) dir = Math.random() < 0.7 ? 'down' : (h ? 'dnR' : 'dnL');
+    if (o.band === 0) dir = Math.random() < 0.8 ? 'up' : (h?'upR':'upL');
+    else if (o.band === 2) dir = Math.random() < 0.7 ? 'down' : (h?'dnR':'dnL');
     else if (o.band === 3) dir = h ? 'dnR' : 'dnL';
     else dir = h ? 'left' : 'right';
     notes.push({ t:o.t, col, row, hand:h, dir, band:o.band, hit:false, spawned:false });
@@ -354,15 +335,16 @@ let diffIdx  = Number(localStorage.getItem('cutline.diff')  ?? 1);
 let speedIdx = Number(localStorage.getItem('cutline.speed') ?? 1);
 let lenIdx   = Number(localStorage.getItem('cutline.len')   ?? 2);
 let syncOffsetMs = Number(localStorage.getItem('cutline.offset') || 0);
+let flaccid  = localStorage.getItem('cutline.flop') === '1';
 
 const LEN = () => LENS[lenIdx];
 const speed = () => SPEEDS[speedIdx].v;
-
 function save(){
   localStorage.setItem('cutline.diff', String(diffIdx));
   localStorage.setItem('cutline.speed', String(speedIdx));
   localStorage.setItem('cutline.len', String(lenIdx));
   localStorage.setItem('cutline.offset', String(syncOffsetMs));
+  localStorage.setItem('cutline.flop', flaccid ? '1' : '0');
 }
 
 /* ══════════════════ scene ══════════════════ */
@@ -387,7 +369,7 @@ scene.add(new THREE.HemisphereLight(0x3a5a8f, 0x0a0812, 0.85));
 const key = new THREE.DirectionalLight(0xbfd8ff, 0.9); key.position.set(1,3,2); scene.add(key);
 
 const RED = 0xff2d6b, BLUE = 0x15d6ff;
-const HIT_PLANE = -0.35;          // where your hands are, not where your head is
+const HIT_PLANE = -0.35;
 
 const grid = new THREE.GridHelper(6, 12, 0x1d4e6b, 0x12304a);
 grid.position.z = -8; grid.scale.z = 4;
@@ -395,12 +377,12 @@ grid.material.transparent = true; grid.material.opacity = 0.5;
 scene.add(grid);
 
 const railHalos = [];
-for (const side of [-1, 1]){
-  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.025, 26),
+for (const side of [-1,1]){
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.025,0.025,26),
     new THREE.MeshBasicMaterial({ color:0x1fa8d8 }));
   rail.position.set(side*1.18, 0.02, -11);
   scene.add(rail);
-  const halo = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 26),
+  const halo = new THREE.Mesh(new THREE.BoxGeometry(0.1,0.1,26),
     new THREE.MeshBasicMaterial({ color:0x1fa8d8, transparent:true, opacity:0.12,
       blending:THREE.AdditiveBlending, depthWrite:false }));
   halo.position.copy(rail.position);
@@ -408,41 +390,40 @@ for (const side of [-1, 1]){
   railHalos.push(halo);
 }
 
-/* a bar on the floor marking exactly where a block is "on the beat" */
 const hitMark = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.012, 0.03),
   new THREE.MeshBasicMaterial({ color:0xffc24a, transparent:true, opacity:0.35,
     blending:THREE.AdditiveBlending, depthWrite:false }));
 hitMark.position.set(0, 0.03, HIT_PLANE);
 scene.add(hitMark);
 
-const COL_X = c => (c - 1.5) * 0.45;
-const ROW_Y = r => 0.88 + r * 0.42;
+const COL_X = c => (c-1.5)*0.45;
+const ROW_Y = r => 0.88 + r*0.42;
 const BLOCK = 0.26;
 
-function roundedBoxGeo(w, h, d, r){
+function roundedBoxGeo(w,h,d,r){
   const s = new THREE.Shape();
-  const x = -w/2 + r, y = -h/2 + r, iw = w - r*2, ih = h - r*2;
-  s.moveTo(x, y - r);
-  s.lineTo(x + iw, y - r);
-  s.quadraticCurveTo(x + iw + r, y - r, x + iw + r, y);
-  s.lineTo(x + iw + r, y + ih);
-  s.quadraticCurveTo(x + iw + r, y + ih + r, x + iw, y + ih + r);
-  s.lineTo(x, y + ih + r);
-  s.quadraticCurveTo(x - r, y + ih + r, x - r, y + ih);
-  s.lineTo(x - r, y);
-  s.quadraticCurveTo(x - r, y - r, x, y - r);
-  const g = new THREE.ExtrudeGeometry(s, { depth: d*0.74, bevelEnabled:true,
-    bevelThickness: d*0.13, bevelSize: d*0.13, bevelSegments:3, curveSegments:7 });
+  const x = -w/2+r, y = -h/2+r, iw = w-r*2, ih = h-r*2;
+  s.moveTo(x, y-r);
+  s.lineTo(x+iw, y-r);
+  s.quadraticCurveTo(x+iw+r, y-r, x+iw+r, y);
+  s.lineTo(x+iw+r, y+ih);
+  s.quadraticCurveTo(x+iw+r, y+ih+r, x+iw, y+ih+r);
+  s.lineTo(x, y+ih+r);
+  s.quadraticCurveTo(x-r, y+ih+r, x-r, y+ih);
+  s.lineTo(x-r, y);
+  s.quadraticCurveTo(x-r, y-r, x, y-r);
+  const g = new THREE.ExtrudeGeometry(s, { depth:d*0.74, bevelEnabled:true,
+    bevelThickness:d*0.13, bevelSize:d*0.13, bevelSegments:3, curveSegments:7 });
   g.center();
   return g;
 }
-const coreGeo = roundedBoxGeo(BLOCK, BLOCK, BLOCK, BLOCK*0.22);
-const haloGeo = roundedBoxGeo(BLOCK*1.26, BLOCK*1.26, BLOCK*1.26, BLOCK*0.3);
+const coreGeo = roundedBoxGeo(BLOCK,BLOCK,BLOCK,BLOCK*0.22);
+const haloGeo = roundedBoxGeo(BLOCK*1.26,BLOCK*1.26,BLOCK*1.26,BLOCK*0.3);
 
 function arrowTexture(){
   const c = document.createElement('canvas'); c.width = c.height = 128;
   const g = c.getContext('2d');
-  g.shadowColor = '#ffffff'; g.shadowBlur = 16; g.fillStyle = '#ffffff';
+  g.shadowColor='#fff'; g.shadowBlur=16; g.fillStyle='#fff';
   g.beginPath(); g.moveTo(64,20); g.lineTo(100,68); g.lineTo(78,68);
   g.lineTo(78,106); g.lineTo(50,106); g.lineTo(50,68); g.lineTo(28,68);
   g.closePath(); g.fill();
@@ -451,7 +432,7 @@ function arrowTexture(){
 function dotTexture(){
   const c = document.createElement('canvas'); c.width = c.height = 128;
   const g = c.getContext('2d');
-  g.shadowColor = '#ffffff'; g.shadowBlur = 18; g.fillStyle = '#ffffff';
+  g.shadowColor='#fff'; g.shadowBlur=18; g.fillStyle='#fff';
   g.beginPath(); g.arc(64,64,26,0,Math.PI*2); g.fill();
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
@@ -500,7 +481,7 @@ let flashCursor = 0;
 function burst(pos, colorHex, dirVec, power){
   const n = 16 + Math.round(power*8);
   for (let i=0;i<n;i++){
-    const s = shards[shardCursor = (shardCursor+1) % SHARDS];
+    const s = shards[shardCursor = (shardCursor+1)%SHARDS];
     s.m.visible = true;
     s.m.material.color.setHex(colorHex);
     s.m.material.opacity = 1;
@@ -515,14 +496,14 @@ function burst(pos, colorHex, dirVec, power){
     s.vel.x += (Math.random()-0.5)*2.2;
     s.vel.y += (Math.random()-0.5)*2.2;
     s.vel.z += 1.2 + Math.random()*2.4;
-    s.spin.set((Math.random()-0.5)*16, (Math.random()-0.5)*16, (Math.random()-0.5)*16);
+    s.spin.set((Math.random()-0.5)*16,(Math.random()-0.5)*16,(Math.random()-0.5)*16);
     s.life = 0; s.max = 0.5 + Math.random()*0.45;
   }
-  const f = flashes[flashCursor = (flashCursor+1) % FLASHES];
+  const f = flashes[flashCursor = (flashCursor+1)%FLASHES];
   f.m.visible = true; f.m.position.copy(pos);
   f.m.material.color.setHex(colorHex);
   f.m.material.opacity = 0.9;
-  f.m.scale.set(0.3, 0.3, 1);
+  f.m.scale.set(0.3,0.3,1);
   f.life = 0;
 }
 function stepDebris(dt){
@@ -547,41 +528,125 @@ function stepDebris(dt){
   }
 }
 
-/* ── sabers ── */
-const BLADE = 0.95, sabers = [];
+/* ══════════════════ sabers — rigid or rubber ══════════════════ */
+
+const BLADE = 0.95;
+const NODES = 9;                     // blade is a chain; node 0 sits at the hilt
+const SEG = BLADE/(NODES-1);
+const STIFF = 0.42;                  // how eagerly the blade straightens
+const FLOP_G = 4.5;                  // droop
+const Y_AXIS = new THREE.Vector3(0,1,0);
+const sabers = [];
+
 for (let i=0;i<2;i++){
   const c = renderer.xr.getController(i);
   scene.add(c);
   const color = i === 0 ? RED : BLUE;
-  const blade = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.009, BLADE, 12),
-    new THREE.MeshBasicMaterial({ color:0xffffff }));
-  blade.rotation.x = -Math.PI/2; blade.position.z = -BLADE/2 - 0.06;
-  c.add(blade);
-  const glow = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.026, BLADE, 12),
-    new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.4,
-      blending:THREE.AdditiveBlending, depthWrite:false }));
-  glow.rotation.x = -Math.PI/2; glow.position.z = -BLADE/2 - 0.06;
-  c.add(glow);
-  const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.019, 0.11, 10),
+
+  const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.019,0.019,0.11,10),
     new THREE.MeshStandardMaterial({ color:0x20242e, roughness:0.6 }));
   hilt.rotation.x = -Math.PI/2; hilt.position.z = -0.02;
   c.add(hilt);
-  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 3, 6),
+
+  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0035,0.0035,3,6),
     new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.55,
       blending:THREE.AdditiveBlending, depthWrite:false }));
   ray.rotation.x = -Math.PI/2; ray.position.z = -1.5; ray.visible = false;
   c.add(ray);
-  const s = { ctrl:c, hand:i, src:null, ray, pts:[], prev:[],
-              vel:new THREE.Vector3(), hasPrev:false, wasTrig:false, wasMenu:false };
-  c.addEventListener('connected', e => { s.src = e.data; });
-  c.addEventListener('disconnected', () => { s.src = null; s.hasPrev = false; });
-  for (let k=0;k<7;k++){ s.pts.push(new THREE.Vector3()); s.prev.push(new THREE.Vector3()); }
+
+  /* blade drawn as world-space segments so it can bend */
+  const segs = [], glows = [];
+  for (let j=0;j<NODES-1;j++){
+    const core = new THREE.Mesh(new THREE.CylinderGeometry(0.0115,0.0115,1,8),
+      new THREE.MeshBasicMaterial({ color:0xffffff }));
+    const gl = new THREE.Mesh(new THREE.CylinderGeometry(0.031,0.031,1,8),
+      new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.36,
+        blending:THREE.AdditiveBlending, depthWrite:false }));
+    core.frustumCulled = false; gl.frustumCulled = false;
+    scene.add(core); scene.add(gl);
+    segs.push(core); glows.push(gl);
+  }
+
+  const s = { ctrl:c, hand:i, src:null, ray, segs, glows, color,
+              nodes:[], prevNodes:[], vel:[], inited:false,
+              swing:new THREE.Vector3(), wasTrig:false, wasMenu:false };
+  for (let k=0;k<NODES;k++){
+    s.nodes.push(new THREE.Vector3());
+    s.prevNodes.push(new THREE.Vector3());
+    s.vel.push(new THREE.Vector3());
+  }
+  c.addEventListener('connected', e => { s.src = e.data; s.inited = false; });
+  c.addEventListener('disconnected', () => { s.src = null; s.inited = false; });
   sabers.push(s);
 }
-function saberPoints(s){
-  for (let k=0;k<7;k++)
-    s.pts[k].set(0, 0, -0.06 - (BLADE*k/6)).applyMatrix4(s.ctrl.matrixWorld);
+
+const _base = new THREE.Vector3(), _fwd = new THREE.Vector3();
+const _ideal = new THREE.Vector3(), _dirv = new THREE.Vector3();
+const _mid = new THREE.Vector3(), _q = new THREE.Quaternion();
+
+function updateSaber(s, dt){
+  const m = s.ctrl.matrixWorld;
+  _base.set(0,0,-0.06).applyMatrix4(m);
+  _fwd.set(0,0,-1).transformDirection(m).normalize();
+
+  for (let i=0;i<NODES;i++) s.prevNodes[i].copy(s.nodes[i]);
+
+  if (!s.inited || !flaccid){
+    for (let i=0;i<NODES;i++) s.nodes[i].copy(_base).addScaledVector(_fwd, SEG*i);
+    if (!s.inited){
+      for (let i=0;i<NODES;i++){ s.prevNodes[i].copy(s.nodes[i]); s.vel[i].set(0,0,0); }
+      s.inited = true;
+    }
+  } else {
+    s.nodes[0].copy(_base);
+    for (let i=1;i<NODES;i++){
+      s.vel[i].y -= FLOP_G*dt;
+      s.nodes[i].addScaledVector(s.vel[i], dt);
+    }
+    for (let iter=0; iter<2; iter++){
+      for (let i=1;i<NODES;i++){
+        if (i === 1) _ideal.copy(s.nodes[0]).addScaledVector(_fwd, SEG);
+        else {
+          _dirv.copy(s.nodes[i-1]).sub(s.nodes[i-2]);
+          if (_dirv.lengthSq() < 1e-9) _dirv.copy(_fwd);
+          _dirv.normalize();
+          _ideal.copy(s.nodes[i-1]).addScaledVector(_dirv, SEG);
+        }
+        s.nodes[i].lerp(_ideal, STIFF);
+        _dirv.copy(s.nodes[i]).sub(s.nodes[i-1]);
+        const len = _dirv.length();
+        if (len > 1e-6) s.nodes[i].copy(s.nodes[i-1]).addScaledVector(_dirv.divideScalar(len), SEG);
+      }
+    }
+    const damp = Math.pow(0.02, dt);
+    for (let i=1;i<NODES;i++){
+      s.vel[i].copy(s.nodes[i]).sub(s.prevNodes[i]).divideScalar(Math.max(dt,1e-4)).multiplyScalar(damp);
+      const L = s.vel[i].length();
+      if (L > 26) s.vel[i].multiplyScalar(26/L);
+    }
+  }
+
+  /* draw */
+  for (let j=0;j<NODES-1;j++){
+    const a = s.nodes[j], b = s.nodes[j+1];
+    _mid.copy(a).add(b).multiplyScalar(0.5);
+    _dirv.copy(b).sub(a);
+    const len = _dirv.length() || 1e-5;
+    _q.setFromUnitVectors(Y_AXIS, _dirv.divideScalar(len));
+    const taper = 1 - j*0.045;
+    for (const mesh of [s.segs[j], s.glows[j]]){
+      mesh.position.copy(_mid);
+      mesh.quaternion.copy(_q);
+      mesh.scale.set(taper, len, taper);
+      mesh.visible = true;
+    }
+  }
 }
+
+function hideSaber(s){
+  for (let j=0;j<NODES-1;j++){ s.segs[j].visible = false; s.glows[j].visible = false; }
+}
+
 function buzz(s, i, ms){
   const a = s?.src?.gamepad?.hapticActuators?.[0];
   if (a?.pulse){ try { a.pulse(i, ms); } catch(e){} }
@@ -593,7 +658,7 @@ hudCanvas.width = 512; hudCanvas.height = 170;
 const hudCtx = hudCanvas.getContext('2d');
 const hudTex = new THREE.CanvasTexture(hudCanvas);
 hudTex.colorSpace = THREE.SRGBColorSpace;
-const hud = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.365),
+const hud = new THREE.Mesh(new THREE.PlaneGeometry(1.1,0.365),
   new THREE.MeshBasicMaterial({ map:hudTex, transparent:true }));
 hud.position.set(0, 2.25, -3.2);
 scene.add(hud);
@@ -605,8 +670,7 @@ function drawHud(msg){
   g.clearRect(0,0,512,170);
   g.textAlign = 'center';
   if (test){
-    g.shadowColor = '#ffc24a'; g.shadowBlur = 16;
-    g.fillStyle = '#ffc24a';
+    g.shadowColor='#ffc24a'; g.shadowBlur=16; g.fillStyle='#ffc24a';
     g.font = '600 40px Inter, Helvetica, Arial';
     g.fillText('Timing test', 256, 44);
     g.shadowBlur = 0;
@@ -617,18 +681,17 @@ function drawHud(msg){
     g.font = '400 24px Inter, Helvetica, Arial';
     g.fillStyle = '#8b93a0';
     g.fillText(test.errors.length + ' of ' + test.times.length +
-      (last === null ? '' : (last > 0 ? '  ·  late' : '  ·  early')), 256, 148);
+      (last === null ? '' : (last>0 ? '  ·  late' : '  ·  early')), 256, 148);
     hudTex.needsUpdate = true;
     return;
   }
-  g.shadowColor = '#15d6ff'; g.shadowBlur = 18;
-  g.fillStyle = '#eef2f7';
+  g.shadowColor='#15d6ff'; g.shadowBlur=18; g.fillStyle='#eef2f7';
   g.font = '600 64px Inter, Helvetica, Arial';
   g.fillText(score.toLocaleString(), 256, 66);
   g.shadowBlur = 10;
   g.font = '500 30px Inter, Helvetica, Arial';
   g.fillStyle = combo > 0 ? '#ffc24a' : '#5f6774';
-  g.fillText(combo > 0 ? combo + 'x combo' : (msg || '—'), 256, 114);
+  g.fillText(combo > 0 ? combo+'x combo' : (msg || '—'), 256, 114);
   g.shadowBlur = 0;
   g.font = '400 22px Inter, Helvetica, Arial';
   g.fillStyle = '#6f7a88';
@@ -639,13 +702,13 @@ drawHud('ready');
 
 /* ══════════════════ menu ══════════════════ */
 
-const MW = 1024, MH = 820;
+const MW = 1024, MH = 900;
 const menuCanvas = document.createElement('canvas');
 menuCanvas.width = MW; menuCanvas.height = MH;
 const mg = menuCanvas.getContext('2d');
 const menuTex = new THREE.CanvasTexture(menuCanvas);
 menuTex.colorSpace = THREE.SRGBColorSpace;
-const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.921),
+const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.011),
   new THREE.MeshBasicMaterial({ map:menuTex, transparent:true }));
 menuMesh.visible = false;
 scene.add(menuMesh);
@@ -655,10 +718,11 @@ const MAIN = [
   { id:'resume',  label:() => songStarted ? 'Resume' : 'Start' },
   { id:'restart', label:() => 'Restart song' },
   { id:'test',    label:() => 'Timing test' },
-  { id:'offset',  label:() => 'Offset', value:() => (syncOffsetMs>0?'+':'') + syncOffsetMs + ' ms', split:true },
+  { id:'offset',  label:() => 'Offset', value:() => (syncOffsetMs>0?'+':'')+syncOffsetMs+' ms', split:true },
   { id:'len',     label:() => 'Hit window', value:() => LENS[lenIdx].name },
   { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
   { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
+  { id:'flop',    label:() => 'Flaccid mode', value:() => flaccid ? 'ON' : 'off' },
   { id:'exit',    label:() => 'Exit to desktop' },
 ];
 let RESULT = [];
@@ -689,7 +753,7 @@ function drawMenu(){
     const m = Math.round(testResult.median*1000);
     mg.fillText(`You sliced ${Math.abs(m)} ms ${m>0?'late':'early'} on average, over ${testResult.n} hits.`, MW/2, 128);
   } else {
-    mg.fillText(score > 0 ? (score.toLocaleString() + ' · ' + hits + '/' + (hits+misses) + ' · best ' + best + 'x')
+    mg.fillText(score > 0 ? (score.toLocaleString()+' · '+hits+'/'+(hits+misses)+' · best '+best+'x')
                           : 'Point and pull the trigger', MW/2, 128);
   }
 
@@ -708,7 +772,7 @@ function drawMenu(){
     mg.fillText(it.label(), 82, y);
     if (it.value){
       mg.textAlign = 'right';
-      mg.fillStyle = '#ffc24a';
+      mg.fillStyle = (it.id === 'flop' && !flaccid) ? '#4d5664' : '#ffc24a';
       mg.font = '600 34px Inter, Helvetica, Arial';
       mg.fillText(it.value(), MW-82, y);
       if (it.split){
@@ -731,8 +795,8 @@ function openMenu(mode){
   const p = new THREE.Vector3(), q = new THREE.Quaternion();
   head.getWorldPosition(p); head.getWorldQuaternion(q);
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(q);
-  menuMesh.position.copy(p).addScaledVector(fwd, 1.5);
-  menuMesh.position.y = Math.max(1.0, p.y - 0.12);
+  menuMesh.position.copy(p).addScaledVector(fwd, 1.55);
+  menuMesh.position.y = Math.max(1.0, p.y - 0.1);
   menuMesh.lookAt(p);
   menuMesh.visible = true;
   for (const s of sabers) s.ray.visible = true;
@@ -741,24 +805,23 @@ function openMenu(mode){
 function closeMenu(){
   menuOpen = false; hoverIdx = -1;
   menuMesh.visible = false;
-  for (const s of sabers){ s.ray.visible = false; s.hasPrev = false; }
+  for (const s of sabers){ s.ray.visible = false; s.inited = false; }
 }
 
 const raycaster = new THREE.Raycaster();
-const _org = new THREE.Vector3(), _dir = new THREE.Vector3();
+const _org = new THREE.Vector3(), _rd = new THREE.Vector3();
 function menuPick(s){
   _org.setFromMatrixPosition(s.ctrl.matrixWorld);
-  _dir.set(0,0,-1).transformDirection(s.ctrl.matrixWorld);
-  raycaster.set(_org, _dir);
+  _rd.set(0,0,-1).transformDirection(s.ctrl.matrixWorld);
+  raycaster.set(_org, _rd);
   const hit = raycaster.intersectObject(menuMesh, false)[0];
   if (!hit || !hit.uv) return null;
-  const cx = hit.uv.x * MW, cy = (1 - hit.uv.y) * MH;
-  const idx = Math.floor((cy - (ROW_TOP - 48)) / ROW_H);
+  const cx = hit.uv.x*MW, cy = (1-hit.uv.y)*MH;
+  const idx = Math.floor((cy - (ROW_TOP-48))/ROW_H);
   if (idx < 0 || idx >= items().length) return null;
   if (cx < 48 || cx > MW-48) return null;
   let side = 0;
-  const it = items()[idx];
-  if (it.split){
+  if (items()[idx].split){
     if (cx > MW-370 && cx < MW-290) side = -1;
     else if (cx > MW-290 && cx < MW-210) side = 1;
   }
@@ -771,14 +834,14 @@ function activate(id, side, s){
     case 'restart': startSong(); closeMenu(); break;
     case 'test': startTimingTest(); break;
     case 'offset':
-      syncOffsetMs = Math.max(-300, Math.min(300, syncOffsetMs + (side >= 0 ? 5 : -5))); break;
-    case 'len':   lenIdx = (lenIdx+1) % LENS.length; break;
-    case 'diff':  diffIdx = (diffIdx+1) % DIFFS.length; rechartLive(); break;
-    case 'speed': speedIdx = (speedIdx+1) % SPEEDS.length; break;
+      syncOffsetMs = Math.max(-300, Math.min(300, syncOffsetMs + (side>=0?5:-5))); break;
+    case 'len':   lenIdx = (lenIdx+1)%LENS.length; break;
+    case 'diff':  diffIdx = (diffIdx+1)%DIFFS.length; rechartLive(); break;
+    case 'speed': speedIdx = (speedIdx+1)%SPEEDS.length; break;
+    case 'flop':  flaccid = !flaccid; for (const q of sabers) q.inited = false; break;
     case 'exit':  renderer.xr.getSession()?.end(); break;
     case 'apply':
-      syncOffsetMs = Math.round(Math.max(-300, Math.min(300,
-        syncOffsetMs - testResult.median*1000)));
+      syncOffsetMs = Math.round(Math.max(-300, Math.min(300, syncOffsetMs - testResult.median*1000)));
       testResult = null; openMenu('main'); break;
     case 'again': startTimingTest(); break;
     case 'back':  testResult = null; openMenu('main'); break;
@@ -789,7 +852,6 @@ function activate(id, side, s){
 }
 
 /* ── timing test ── */
-
 function click(at){
   const o = ac.createOscillator(), g = ac.createGain();
   o.type = 'square'; o.frequency.setValueAtTime(1500, at);
@@ -799,7 +861,6 @@ function click(at){
   o.connect(g).connect(ac.destination);
   o.start(at); o.stop(at+0.12);
 }
-
 const testTime = () => ac.currentTime + syncOffsetMs/1000;
 
 function startTimingTest(){
@@ -812,15 +873,13 @@ function startTimingTest(){
   for (let i=0;i<n;i++){
     const T = t0 + i*period;
     test.times.push(T);
-    click(T - syncOffsetMs/1000);     // click lands at the real moment
+    click(T - syncOffsetMs/1000);
   }
   drawHud();
 }
-
 function finishTest(){
   if (!test) return;
-  const e = test.errors.slice();
-  const n = e.length;
+  const e = test.errors.slice(), n = e.length;
   test = null;
   if (n >= 4){
     e.sort((a,b) => a-b);
@@ -831,30 +890,25 @@ function finishTest(){
       { id:'again', label:() => 'Run the test again' },
       { id:'back',  label:() => 'Keep current offset' },
     ];
-    openMenu('result');
   } else {
+    testResult = { median:0, n };
     RESULT = [
       { id:'again', label:() => 'Not enough hits — try again' },
       { id:'back',  label:() => 'Back' },
     ];
-    testResult = { median:0, n };
-    openMenu('result');
   }
+  openMenu('result');
   drawHud();
 }
-
 function tickTest(dt){
   const t = testTime(), v = speed();
   const lead = (12 + HIT_PLANE)/v;
-
   while (test.next < test.times.length && test.times[test.next] - t < lead){
-    const T = test.times[test.next];
-    const i = test.next++;
+    const T = test.times[test.next], i = test.next++;
     const b = blocks.find(x => !x.note);
     if (!b) continue;
-    const h = i % 2;
-    const c = h ? BLUE : RED;
-    b.note = { t:T, hand:h, dir:'up', row:1, col: h?2:1, hit:false, isTest:true };
+    const h = i % 2, c = h ? BLUE : RED;
+    b.note = { t:T, hand:h, dir:'up', row:1, col:h?2:1, hit:false, isTest:true };
     b.body.material.emissive.setHex(c);
     b.halo.material.color.setHex(c);
     b.arrow.material.map = arrowTex; b.arrow.material.needsUpdate = true;
@@ -862,17 +916,13 @@ function tickTest(dt){
     b.grp.position.set(COL_X(h?2:1), ROW_Y(1), -12);
     b.grp.visible = true;
   }
-
   for (const b of blocks){
     if (!b.note) continue;
     b.grp.position.z = (t - b.note.t)*v + HIT_PLANE;
     if (b.grp.position.z > 2.8){ b.grp.visible = false; b.note = null; }
   }
-
   checkSabers(dt, true);
-
-  if (test.next >= test.times.length && t > test.times[test.times.length-1] + 1.6)
-    finishTest();
+  if (test.next >= test.times.length && t > test.times[test.times.length-1] + 1.6) finishTest();
 }
 
 /* ══════════════════ gameplay ══════════════════ */
@@ -903,20 +953,20 @@ function makeSource(offsetSec){
   };
   playing = true;
 }
-function killSource(){ if (source){ try { source.onended = null; source.stop(); } catch(e){} source = null; } }
+function killSource(){ if (source){ try { source.onended=null; source.stop(); } catch(e){} source=null; } }
 function startSong(){ killSource(); resetRun(); songStarted = true; makeSource(0); }
 function pauseSong(){ pausedAt = songTime(); killSource(); playing = false; }
 function resumeSong(){ if (!songStarted) return startSong(); makeSource(pausedAt); }
 
-const _a = new THREE.Vector3(), _d = new THREE.Vector3(), _wdir = new THREE.Vector3();
+const _a = new THREE.Vector3(), _dd = new THREE.Vector3(), _wdir = new THREE.Vector3();
 
-function segHitsBox(p0, p1, cx, cy, cz, h){
+function segHitsBox(p0,p1,cx,cy,cz,h){
   let t0 = 0, t1 = 1;
-  const d = _d.copy(p1).sub(p0);
-  const lo = [cx-h, cy-h, cz-h], hi = [cx+h, cy+h, cz+h];
+  const d = _dd.copy(p1).sub(p0);
+  const lo = [cx-h,cy-h,cz-h], hi = [cx+h,cy+h,cz+h];
   const o = [p0.x,p0.y,p0.z], dd = [d.x,d.y,d.z];
   for (let i=0;i<3;i++){
-    if (Math.abs(dd[i]) < 1e-7){ if (o[i] < lo[i] || o[i] > hi[i]) return false; continue; }
+    if (Math.abs(dd[i]) < 1e-7){ if (o[i]<lo[i]||o[i]>hi[i]) return false; continue; }
     let a = (lo[i]-o[i])/dd[i], b = (hi[i]-o[i])/dd[i];
     if (a > b){ const t=a; a=b; b=t; }
     if (a > t0) t0 = a;
@@ -931,19 +981,27 @@ function registerHit(b, quality, s, dirVec, power){
     test.errors.push(testTime() - b.note.t);
     burst(b.grp.position, b.note.hand ? BLUE : RED, dirVec, power);
     b.grp.visible = false; b.note = null;
-    buzz(s, 0.55, 35);
-    drawHud();
+    buzz(s, 0.55, 35); drawHud();
+    if (flaccid && s) recoil(s, dirVec, power);
     return;
   }
   b.note.hit = true; combo++; hits++;
   if (combo > best) best = combo;
   const mult = combo >= 24 ? 8 : combo >= 12 ? 4 : combo >= 5 ? 2 : 1;
-  score += Math.round((70 + 40*quality) * mult);
+  score += Math.round((70 + 40*quality)*mult);
   burst(b.grp.position, b.note.hand ? BLUE : RED, dirVec, power);
   b.grp.visible = false; b.note = null;
   drawHud();
   buzz(s, 0.55, 35);
+  if (flaccid && s) recoil(s, dirVec, power);
 }
+
+/* a hit should make the rubber blade kick back and wobble */
+function recoil(s, dirVec, power){
+  for (let i=1;i<NODES;i++)
+    s.vel[i].addScaledVector(dirVec, -3.2*power*(i/(NODES-1)));
+}
+
 function registerMiss(b){
   combo = 0; misses++;
   b.grp.visible = false; b.note = null;
@@ -954,29 +1012,26 @@ function checkSabers(dt, generous){
   const L = generous ? LENS[2] : LEN();
   const halfBox = BLOCK*L.box;
   for (const s of sabers){
-    if (!s.src) continue;
-    saberPoints(s);
-    if (!s.hasPrev){ for (let k=0;k<7;k++) s.prev[k].copy(s.pts[k]); s.hasPrev = true; continue; }
-    s.vel.copy(s.pts[5]).sub(s.prev[5]).divideScalar(Math.max(dt,1e-4));
-    const sp = s.vel.length();
-    if (sp > L.spd){
-      for (const b of blocks){
-        if (!b.note || b.note.hand !== s.hand) continue;
-        const p = b.grp.position;
-        let touched = false;
-        for (let k=1;k<7 && !touched;k++)
-          touched = segHitsBox(s.prev[k], s.pts[k], p.x, p.y, p.z, halfBox);
-        if (!touched) continue;
-        const want = DIRS[b.note.dir];
-        _a.set(s.vel.x, s.vel.y, 0).normalize();
-        const align = _a.x*want[0] + _a.y*want[1];
-        if (align > L.align){
-          _wdir.set(_a.x, _a.y, 0);
-          registerHit(b, Math.min(1,(sp-L.spd)/5)*0.5 + Math.max(0,align)*0.5, s, _wdir, Math.min(1.4, sp/5));
-        }
+    if (!s.src || !s.inited) continue;
+    /* the blade's own motion, which in flaccid mode is not your hand's */
+    s.swing.copy(s.nodes[NODES-2]).sub(s.prevNodes[NODES-2]).divideScalar(Math.max(dt,1e-4));
+    const sp = s.swing.length();
+    if (sp <= L.spd) continue;
+    for (const b of blocks){
+      if (!b.note || b.note.hand !== s.hand) continue;
+      const p = b.grp.position;
+      let touched = false;
+      for (let k=1;k<NODES && !touched;k++)
+        touched = segHitsBox(s.prevNodes[k], s.nodes[k], p.x, p.y, p.z, halfBox);
+      if (!touched) continue;
+      const want = DIRS[b.note.dir];
+      _a.set(s.swing.x, s.swing.y, 0).normalize();
+      const align = _a.x*want[0] + _a.y*want[1];
+      if (align > L.align){
+        _wdir.set(_a.x, _a.y, 0);
+        registerHit(b, Math.min(1,(sp-L.spd)/5)*0.5 + Math.max(0,align)*0.5, s, _wdir, Math.min(1.4, sp/5));
       }
     }
-    for (let k=0;k<7;k++) s.prev[k].copy(s.pts[k]);
   }
 }
 
@@ -1016,10 +1071,10 @@ function tick(dt){
 
   if (!autoPlay) checkSabers(dt, false);
 
-  /* pulse the rails on the detected beat — a visible metronome */
   if (chart){
-    const ph = ((t - chart.phase) / chart.beat) % 1;
-    const k = Math.max(0, 1 - (ph < 0 ? ph+1 : ph)*3.2);
+    let ph = ((t - chart.phase)/chart.beat) % 1;
+    if (ph < 0) ph += 1;
+    const k = Math.max(0, 1 - ph*3.2);
     for (const h of railHalos) h.material.opacity = 0.1 + k*0.38;
   }
 }
@@ -1058,7 +1113,14 @@ function handleButtons(){
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
-  if (renderer.xr.isPresenting) handleButtons();
+  if (renderer.xr.isPresenting){
+    handleButtons();
+    for (const s of sabers){
+      if (s.src) updateSaber(s, dt); else hideSaber(s);
+    }
+  } else {
+    for (const s of sabers) hideSaber(s);
+  }
   if (test) tickTest(dt); else tick(dt);
   stepDebris(dt);
   if (!renderer.xr.isPresenting) hud.lookAt(camera.position);
@@ -1075,11 +1137,12 @@ function say(m, warn){ statusEl.textContent = m; statusEl.className = warn ? 'wa
 $('diff').selectedIndex = diffIdx;
 $('speed').selectedIndex = speedIdx;
 $('len').selectedIndex = lenIdx;
+$('flop').checked = flaccid;
 
 function rechart(){
   if (!chart) return;
   notes = buildChart(chart, diffIdx);
-  const per = (notes.length / chart.duration).toFixed(1);
+  const per = (notes.length/chart.duration).toFixed(1);
   say(`${notes.length} blocks · ${per}/sec · ~${bpm} BPM · ${Math.round(chart.duration)}s.`);
 }
 function rechartLive(){
@@ -1094,6 +1157,10 @@ function rechartLive(){
 $('diff').addEventListener('change', e => { diffIdx = Number(e.target.value); save(); rechart(); });
 $('speed').addEventListener('change', e => { speedIdx = Number(e.target.value); save(); });
 $('len').addEventListener('change', e => { lenIdx = Number(e.target.value); save(); });
+$('flop').addEventListener('change', e => {
+  flaccid = e.target.checked; save();
+  for (const s of sabers) s.inited = false;
+});
 
 async function loadArrayBuffer(ab, label){
   try{
@@ -1141,14 +1208,17 @@ btnVR.addEventListener('click', async () => {
     await renderer.xr.setSession(session);
     ui.style.display = 'none';
     autoPlay = false; songStarted = false; test = null; testResult = null;
+    for (const s of sabers) s.inited = false;
     hud.position.set(0, 2.25, -3.2); hud.rotation.set(0,0,0);
     setTimeout(() => openMenu('main'), 700);
     session.addEventListener('end', () => {
       killSource(); playing = false; closeMenu(); test = null;
+      for (const s of sabers) hideSaber(s);
       ui.style.display = 'flex';
       $('diff').selectedIndex = diffIdx;
       $('speed').selectedIndex = speedIdx;
       $('len').selectedIndex = lenIdx;
+      $('flop').checked = flaccid;
       say(`Run over — ${hits} hit, ${misses} missed, best combo ${best}. Offset ${syncOffsetMs} ms.`);
     });
   } catch(err){ say('Could not start: ' + err.message, true); }
