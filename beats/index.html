@@ -81,6 +81,7 @@
 
   <label class="check"><input type="checkbox" id="flop"> Flaccid mode — rubber sabers</label>
   <label class="check"><input type="checkbox" id="metro"> Metronome — click on every detected beat</label>
+  <label class="check"><input type="checkbox" id="worm" checked> Wormhole spin at 16× — turn off if it makes you queasy</label>
 
   <div style="margin-bottom:14px">
     <label for="bars">Start after</label>
@@ -404,6 +405,17 @@ function buildChart(a, dIdx, barsIdx){
     notes.push({ t:o.t, col, row, hand:h, dir, band:o.band, hit:false, spawned:false });
   }
   notes.sort((x,y) => x.t - y.t);
+
+  /* A note with room to breathe before the next one is a sustain — give it a
+     tracer whose length matches how long it rings. */
+  for (let i=0;i<notes.length;i++){
+    let gap = Infinity;
+    for (let j=i+1;j<notes.length;j++){
+      if (notes[j].t > notes[i].t + 0.01){ gap = notes[j].t - notes[i].t; break; }
+    }
+    notes[i].long = gap > 0.42;
+    notes[i].dur = Math.min(gap === Infinity ? 1.1 : gap*0.8, 1.1);
+  }
   return notes;
 }
 
@@ -417,10 +429,11 @@ const LENS = [
   { name:'Any direction', box:1.20, spd:0.7, align:-2,   late:3.3 },
 ];
 const TIERS = [
-  { at:0,  mult:1, name:'' },
-  { at:5,  mult:2, name:'2×' },
-  { at:15, mult:4, name:'4×' },
-  { at:30, mult:8, name:'8×' },
+  { at:0,  mult:1,  name:'' },
+  { at:5,  mult:2,  name:'2×' },
+  { at:15, mult:4,  name:'4×' },
+  { at:30, mult:8,  name:'8×' },
+  { at:50, mult:16, name:'16×' },
 ];
 
 let diffIdx  = Number(localStorage.getItem('cutline2.diff')  ?? 1);
@@ -430,6 +443,7 @@ let timingMs = Number(localStorage.getItem('cutline2.timing') || 0);  // + = blo
 let flaccid  = localStorage.getItem('cutline2.flop') === '1';
 let metro    = localStorage.getItem('cutline2.metro') === '1';
 let barsIdx  = Number(localStorage.getItem('cutline2.bars') ?? 1);
+let wormSpin = localStorage.getItem('cutline2.worm') !== '0';   // comfort toggle
 
 const LEN = () => LENS[lenIdx];
 const speed = () => SPEEDS[speedIdx].v;
@@ -441,6 +455,7 @@ function save(){
   localStorage.setItem('cutline2.flop', flaccid ? '1' : '0');
   localStorage.setItem('cutline2.metro', metro ? '1' : '0');
   localStorage.setItem('cutline2.bars', String(barsIdx));
+  localStorage.setItem('cutline2.worm', wormSpin ? '1' : '0');
 }
 
 function tierOf(c){
@@ -539,6 +554,37 @@ for (let i=0;i<7;i++){
   rings.push(m);
 }
 
+/* ── tier 4: the wormhole ──
+   The tunnel twists and snakes, but the camera is never rotated. Spinning a
+   player's view in VR while their head is still is the fastest way to make
+   someone sick; a rotating tunnel in peripheral vision sells the same feeling
+   while the floor, lanes and hit line stay exactly where the body expects. */
+const TUNNEL_RINGS = 26, TUNNEL_GAP = 1.7;
+const tunnel = new THREE.Group();
+tunnel.position.set(0, 1.5, 0);
+tunnel.visible = false;
+scene.add(tunnel);
+const tRings = [];
+for (let i=0;i<TUNNEL_RINGS;i++){
+  const m = new THREE.Mesh(new THREE.TorusGeometry(2.9, 0.032, 5, 22),
+    new THREE.MeshBasicMaterial({ color:0xb57bff, transparent:true, opacity:0,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+  m.userData.d = i*TUNNEL_GAP;
+  tunnel.add(m);
+  tRings.push(m);
+}
+const spokes = [];
+for (let i=0;i<18;i++){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, 2.6),
+    new THREE.MeshBasicMaterial({ color:0xff6bd6, transparent:true, opacity:0,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+  m.userData.d = Math.random()*TUNNEL_RINGS*TUNNEL_GAP;
+  m.userData.a = Math.random()*Math.PI*2;
+  m.userData.r = 2.3 + Math.random()*0.8;
+  tunnel.add(m);
+  spokes.push(m);
+}
+
 let tierShown = 0, tierGlow = 0;
 
 function setTier(t){
@@ -546,6 +592,9 @@ function setTier(t){
   stars.visible = t >= 1;
   for (const p of pillars) p.visible = t >= 2;
   for (const r of rings) r.visible = t >= 3;
+  tunnel.visible = t >= 4;
+  scene.fog.color.setHex(t >= 4 ? 0x120a1e : 0x05060a);
+  scene.background.setHex(t >= 4 ? 0x0c0616 : 0x05060a);
 }
 
 function stepRewards(dt, beatPulse){
@@ -574,7 +623,47 @@ function stepRewards(dt, beatPulse){
       if (r.position.z > 2) r.position.z -= 31.5;
     }
   }
+  if (tunnel.visible){
+    const k = THREE.MathUtils.clamp(tierGlow-3, 0, 1);
+    const now = performance.now()/1000;
+    for (const r of tRings){
+      r.userData.d -= dt*16;
+      if (r.userData.d < -3) r.userData.d += TUNNEL_RINGS*TUNNEL_GAP;
+      const d = r.userData.d;
+      r.position.set(Math.sin(d*0.13 + now*0.6)*1.05,
+                     Math.sin(d*0.10 + now*0.45)*0.65,
+                     -d);
+      r.rotation.z = d*0.22 + now*0.7;
+      r.rotation.x = Math.sin(d*0.07 + now*0.3)*0.22;
+      const fade = THREE.MathUtils.clamp(1 - d/(TUNNEL_RINGS*TUNNEL_GAP), 0.15, 1);
+      r.material.opacity = k*fade*(0.30 + beatPulse*0.45);
+    }
+    for (const s of spokes){
+      s.userData.d -= dt*22;
+      if (s.userData.d < -3) s.userData.d += TUNNEL_RINGS*TUNNEL_GAP;
+      const d = s.userData.d, a = s.userData.a + d*0.22 + performance.now()/1000*0.7;
+      s.position.set(Math.sin(d*0.13 + performance.now()/1000*0.6)*1.05 + Math.cos(a)*s.userData.r,
+                     Math.sin(d*0.10 + performance.now()/1000*0.45)*0.65 + Math.sin(a)*s.userData.r,
+                     -d);
+      s.material.opacity = k*0.5;
+    }
+    /* the twist itself — geometry only, never the camera */
+    const amp = wormSpin ? 1 : 0;
+    tunnel.rotation.z = (Math.sin(now*0.33)*0.75 + now*0.28) * amp;
+  }
   grid.material.opacity = 0.5 + Math.min(tierGlow,3)*0.09;
+}
+
+/* Blocks drift on a gentle double sine as they fly in, and settle onto their
+   true lane before they reach you — the weave must never change where a block
+   actually has to be hit. */
+const _wv = { x:0, y:0 };
+function weaveAt(n, z){
+  const w = THREE.MathUtils.clamp((-z - 1.4)/5.5, 0, 1);
+  const ph = n.t*3.7 + n.col*1.3 + n.row*0.7;
+  _wv.x = Math.sin(z*0.55 + ph) * 0.115 * w;
+  _wv.y = Math.sin(z*0.41 + ph*1.63) * 0.08 * w;
+  return _wv;
 }
 
 const COL_X = c => (c-1.5)*0.45;
@@ -636,8 +725,20 @@ for (let i=0;i<POOL;i++){
   g.add(arrow);
   g.visible = false;
   scene.add(g);
-  blocks.push({ grp:g, body, halo, arrow, note:null });
+
+  /* tracer stream for sustained notes */
+  const tail = [];
+  for (let k=0;k<8;k++){
+    const m = new THREE.Mesh(new THREE.BoxGeometry(BLOCK*0.5, BLOCK*0.5, BLOCK*0.5),
+      new THREE.MeshBasicMaterial({ color:RED, transparent:true, opacity:0,
+        blending:THREE.AdditiveBlending, depthWrite:false }));
+    m.visible = false;
+    scene.add(m);
+    tail.push(m);
+  }
+  blocks.push({ grp:g, body, halo, arrow, tail, note:null });
 }
+function clearTail(b){ for (const m of b.tail) m.visible = false; }
 
 /* ── debris ── */
 const SHARDS = 240, shards = [];
@@ -951,7 +1052,7 @@ streakPanel.position.set(1.62, 1.62, -2.5);
 streakPanel.rotation.y = -0.55;
 scene.add(streakPanel);
 
-const TIER_COL = ['#5f6774', '#15d6ff', '#ffc24a', '#ff2d6b'];
+const TIER_COL = ['#5f6774', '#15d6ff', '#ffc24a', '#ff2d6b', '#b57bff'];
 
 function drawStreak(){
   const t = tierOf(combo);
@@ -984,7 +1085,7 @@ function drawStreak(){
 
   /* ladder */
   for (let i=1;i<TIERS.length;i++){
-    const y = 300 + (i-1)*48;
+    const y = 286 + (i-1)*44;
     const on = t >= i;
     sg.fillStyle = on ? TIER_COL[i] : '#242a34';
     sg.fillRect(40, y, 280, 6);
@@ -1023,13 +1124,13 @@ function checkTier(s){
 
 /* ══════════════════ menu ══════════════════ */
 
-const MW = 1024, MH = 960;
+const MW = 1024, MH = 1040;
 const menuCanvas = document.createElement('canvas');
 menuCanvas.width = MW; menuCanvas.height = MH;
 const mg = menuCanvas.getContext('2d');
 const menuTex = new THREE.CanvasTexture(menuCanvas);
 menuTex.colorSpace = THREE.SRGBColorSpace;
-const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.078),
+const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.168),
   new THREE.MeshBasicMaterial({ map:menuTex, transparent:true }));
 menuMesh.visible = false;
 scene.add(menuMesh);
@@ -1054,6 +1155,7 @@ const MAIN = [
   { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
   { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
   { id:'flop',    label:() => 'Flaccid mode', value:() => flaccid ? 'ON' : 'off' },
+  { id:'worm',    label:() => 'Wormhole spin', value:() => wormSpin ? 'ON' : 'off' },
   { id:'exit',    label:() => 'Exit to desktop' },
 ];
 let RESULT = [];
@@ -1170,6 +1272,7 @@ function activate(id, side, s){
     case 'diff':  diffIdx = (diffIdx+1)%DIFFS.length; rechartLive(); break;
     case 'speed': speedIdx = (speedIdx+1)%SPEEDS.length; break;
     case 'flop':  flaccid = !flaccid; for (const q of sabers) q.inited = false; break;
+    case 'worm':  wormSpin = !wormSpin; if (!wormSpin) tunnel.rotation.z = 0; break;
     case 'exit':  renderer.xr.getSession()?.end(); break;
     case 'apply':
       timingMs = Math.round(Math.max(-LEAD_MAX, Math.min(LEAD_MAX, timingMs + testResult.median*1000)));
@@ -1251,8 +1354,8 @@ function tickTest(dt){
   }
   for (const b of blocks){
     if (!b.note) continue;
-    b.grp.position.z = (t - b.note.t)*v + HIT_PLANE;
-    if (b.grp.position.z > 2.8){ b.grp.visible = false; b.note = null; }
+    b.grp.position.set(COL_X(b.note.col), ROW_Y(b.note.row), (t - b.note.t)*v + HIT_PLANE);
+    if (b.grp.position.z > 2.8){ b.grp.visible = false; b.note = null; clearTail(b); }
   }
   checkSabers(dt, true);
   if (test.next >= test.times.length && t > test.times[test.times.length-1] + 1.6) finishTest();
@@ -1266,7 +1369,7 @@ let autoPlay = false, pausedAt = 0, finishing = false, metroNext = 0;
 const songTime = () => ac ? (ac.currentTime - startedAt) - timingMs/1000 : 0;
 
 function resetRun(){
-  for (const b of blocks){ b.grp.visible = false; b.note = null; }
+  for (const b of blocks){ b.grp.visible = false; b.note = null; clearTail(b); }
   for (const n of notes){ n.hit = false; n.spawned = false; }
   nextNote = 0; score = 0; combo = 0; best = 0; hits = 0; misses = 0;
   lastTier = 0; setTier(0); tierGlow = 0;
@@ -1327,7 +1430,7 @@ function registerHit(b, quality, s, dirVec, power){
   if (combo > best) best = combo;
   score += Math.round((70 + 40*quality) * TIERS[tierOf(combo)].mult);
   burst(b.grp.position, b.note.hand ? BLUE : RED, dirVec, power);
-  b.grp.visible = false; b.note = null;
+  b.grp.visible = false; b.note = null; clearTail(b);
   checkTier(s);
   drawHud(); drawStreak();
   buzz(s, 0.55, 35);
@@ -1339,7 +1442,7 @@ function recoil(s, dirVec, power){
 }
 function registerMiss(b){
   combo = 0; misses++;
-  b.grp.visible = false; b.note = null;
+  b.grp.visible = false; b.note = null; clearTail(b);
   checkTier(null);
   drawHud('miss'); drawStreak();
 }
@@ -1396,8 +1499,31 @@ function tick(dt){
   for (const b of blocks){
     if (!b.note) continue;
     live++;
-    b.grp.position.z = (t - b.note.t)*v + HIT_PLANE;
-    const near = THREE.MathUtils.clamp(1 + b.grp.position.z/9, 0.4, 1);
+    const n = b.note;
+    const bx = COL_X(n.col), by = ROW_Y(n.row);
+    const z = (t - n.t)*v + HIT_PLANE;
+    weaveAt(n, z);
+    b.grp.position.set(bx + _wv.x, by + _wv.y, z);
+    b.grp.rotation.z = _wv.x * 1.1;
+
+    if (n.long){
+      const step = (n.dur * v) / b.tail.length;
+      const c = n.hand ? BLUE : RED;
+      for (let k=0;k<b.tail.length;k++){
+        const m = b.tail[k];
+        const zz = z - (k+1)*step;
+        weaveAt(n, zz);
+        m.visible = true;
+        m.position.set(bx + _wv.x, by + _wv.y, zz);
+        const f = 1 - k/b.tail.length;
+        m.scale.setScalar(0.3 + f*0.7);
+        m.material.color.setHex(c);
+        m.material.opacity = 0.45*f*f;
+        m.rotation.z = _wv.x*1.4;
+      }
+    }
+
+    const near = THREE.MathUtils.clamp(1 + z/9, 0.4, 1);
     b.body.material.emissiveIntensity = 0.7 + near*0.7;
     b.halo.material.opacity = 0.1 + near*0.14;
     if (autoPlay && b.grp.position.z > HIT_PLANE && !b.note.hit){
@@ -1490,6 +1616,7 @@ $('len').selectedIndex = lenIdx;
 $('flop').checked = flaccid;
 $('metro').checked = metro;
 $('bars').selectedIndex = barsIdx;
+$('worm').checked = wormSpin;
 
 function rechart(){
   if (!chart) return;
@@ -1516,6 +1643,7 @@ $('flop').addEventListener('change', e => {
 });
 $('metro').addEventListener('change', e => { metro = e.target.checked; save(); });
 $('bars').addEventListener('change', e => { barsIdx = Number(e.target.value); save(); rechart(); });
+$('worm').addEventListener('change', e => { wormSpin = e.target.checked; save(); });
 
 /* A chart is just onsets + tempo, so it can be computed once on a fast machine,
    committed next to the MP3, and loaded instantly in the headset. Difficulty
@@ -1635,6 +1763,7 @@ btnVR.addEventListener('click', async () => {
       $('flop').checked = flaccid;
       $('metro').checked = metro;
       $('bars').selectedIndex = barsIdx;
+      $('worm').checked = wormSpin;
       say(`Run over — ${hits} hit, ${misses} missed, best streak ${best}. Block timing ${timingMs} ms.`);
     });
   } catch(err){ say('Could not start: ' + err.message, true); }
