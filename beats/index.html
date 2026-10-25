@@ -82,6 +82,7 @@
   <label class="check"><input type="checkbox" id="flop"> Flaccid mode — rubber sabers</label>
   <label class="check"><input type="checkbox" id="metro"> Metronome — click on every detected beat</label>
   <label class="check"><input type="checkbox" id="worm" checked> Wormhole spin at 16× — turn off if it makes you queasy</label>
+  <label class="check"><input type="checkbox" id="debug"> Debug overlay — shows bar and beat as you play</label>
 
   <div style="margin-bottom:14px">
     <label for="bars">Start after</label>
@@ -280,31 +281,36 @@ async function analyze(buf, onProgress){
   const env = [0,1,2,3].map(() => new Float32Array(frames));
   const re = new Float32Array(N), im = new Float32Array(N);
   const ema = new Float32Array(half);
-  const perc = new Float32Array(half), prevPerc = new Float32Array(half);
+  const perc = new Float32Array(half);
   const prevEma = new Float32Array(half);
 
   for (let f=0; f<frames; f++){
     const off = f*HOP;
     for (let i=0;i<N;i++){ re[i] = L[off+i]*win[i]; im[i] = 0; }
     fft(re, im);
+    /* Log compression first: a drum hit is a proportional jump, not an
+       absolute one, and the linear version let loud passages dominate. */
     for (let k=0;k<half;k++){
       const a = re[k], b = im[k];
-      const m = Math.sqrt(a*a + b*b);
+      const m = Math.log1p(40*Math.sqrt(a*a + b*b));
       const e = ema[k];
       perc[k] = m > e ? m - e : 0;
       ema[k] = e*0.86 + m*0.14;
     }
+    /* The residue IS the onset signal. Differencing it again, as this used
+       to, is a second derivative and mostly amplified noise — it was firing
+       22 times a second on a track with maybe 8 real hits. */
     for (let b=0;b<3;b++){
-      let flux = 0;
+      let acc = 0;
       for (const [lo,hi] of percRanges[b])
-        for (let k=lo;k<hi;k++){ const d = perc[k]-prevPerc[k]; if (d>0) flux += d; }
-      env[b][f] = flux;
+        for (let k=lo;k<hi;k++) acc += perc[k];
+      env[b][f] = acc;
     }
     let mflux = 0;
     for (const [lo,hi] of melRange)
       for (let k=lo;k<hi;k++){ const d = ema[k]-prevEma[k]; if (d>0) mflux += d; }
     env[3][f] = mflux;
-    prevPerc.set(perc); prevEma.set(ema);
+    prevEma.set(ema);
     if ((f & 127) === 0){ onProgress(f/frames*0.82); await yieldFrame(); }
   }
 
@@ -356,25 +362,48 @@ async function analyze(buf, onProgress){
 
   onProgress(0.9); await yieldFrame();
 
-  const W = 20, onsets = [];
+  const W = 20, PEAK = 4, onsets = [];
   for (let b=0;b<4;b++){
-    const e = env[b], thresh = b === 3 ? 1.9 : 1.55;
-    for (let f=2; f<frames-2; f++){
+    const e = env[b], thresh = b === 3 ? 3.2 : 2.8;
+    /* Strength measured against the track's own loud peaks, not the local
+       mean. Relative strength scored a tap in a quiet passage higher than a
+       real kick in a loud one, so thinning preferred the wrong notes. */
+    const srt = Float32Array.from(e).sort();
+    const p97 = srt[Math.floor(srt.length*0.97)] || 1;
+    for (let f=PEAK; f<frames-PEAK; f++){
       const v = e[f];
-      if (v < 0.03) continue;
-      if (v < e[f-1] || v < e[f+1] || v < e[f-2] || v < e[f+2]) continue;
+      if (v < 1e-4) continue;
+      let isMax = true;
+      for (let k=1;k<=PEAK;k++) if (v < e[f-k] || v < e[f+k]){ isMax = false; break; }
+      if (!isMax) continue;
       let mean = 0, n = 0;
       for (let k=Math.max(0,f-W); k<Math.min(frames,f+W); k++){ mean += e[k]; n++; }
       mean /= n;
-      if (v < mean*thresh + 0.018) continue;
-      let strength = Math.min(1, v/(mean*3+0.05));
+      if (v < mean*thresh + 0.02) continue;
+      let strength = Math.min(1, v/p97);
       if (b === 0) strength *= 1.3;
       if (b === 1) strength *= 1.15;
-      onsets.push({ t: f*HOP/sr + CENTRE, band:b, strength });
+      onsets.push({ t: f*HOP/sr + CENTRE, band:b, strength: Math.min(1.4, strength) });
     }
   }
+  /* Local percussive level, sampled at 10 Hz and scaled so 1.0 is the
+     track's own typical loudness. Quiet passages get fewer blocks. */
+  const LRATE = 10;
+  const lw = Math.round(fps*1.5);
+  const lvlFrames = Math.ceil(frames/fps*LRATE);
+  const level = new Float32Array(lvlFrames);
+  for (let i=0;i<lvlFrames;i++){
+    const c = Math.round(i/LRATE*fps);
+    let acc = 0, n = 0;
+    for (let k=Math.max(0,c-lw); k<Math.min(frames,c+lw); k++){ acc += sum[k]; n++; }
+    level[i] = n ? acc/n : 0;
+  }
+  const lsorted = Float32Array.from(level).sort();
+  const lmed = lsorted[Math.floor(lsorted.length*0.5)] || 1;
+  for (let i=0;i<lvlFrames;i++) level[i] = level[i]/lmed;
+
   onProgress(1);
-  return { onsets, bpm: Math.round(60/beat), beat, phase: beats.length ? beats[0] : CENTRE,
+  return { onsets, level, levelRate: LRATE, bpm: Math.round(60/beat), beat, phase: beats.length ? beats[0] : CENTRE,
            beats, downK, drift, bar0, barLen, duration: buf.duration };
 }
 
@@ -383,6 +412,19 @@ async function analyze(buf, onProgress){
 /* How many whole bars of music play before the first block. The first block
    is then forced onto beat one of that bar, so you come in on a downbeat. */
 const START_BARS = [2, 3, 4, 8];
+
+/* Which bar and beat is a moment in? Returns 1-based bar and beat, with the
+   index into the tracked beat array, so the overlay can name any instant. */
+function barBeat(a, t){
+  const B = a && a.beats;
+  if (!B || B.length < 2) return null;
+  let i = nearestBeat(B, t);
+  if (B[i] > t && i > 0) i--;
+  const k = i - effDownK(a);
+  const bar  = Math.floor(k/4) + 1;
+  const beat = ((k % 4) + 4) % 4 + 1;
+  return { bar, beat, i, at: B[i] };
+}
 
 /* nearest index in a sorted array */
 function nearestBeat(beats, t){
@@ -415,11 +457,13 @@ function snapTime(a, t, div, tol){
   return bd <= tol ? best : t;
 }
 
+function effDownK(a){ return ((((a.downK||0) + beatShift) % 4) + 4) % 4; }
+
 function chartStart(a, barsIdx){
   const bars = START_BARS[barsIdx];
   const B = a.beats;
   if (B && B.length > 4){
-    const d0 = a.downK || 0;
+    const d0 = effDownK(a);
     let i = d0 + bars*4;
     while (i < B.length && B[i] < 2.2) i += 4;      // need room to fly in
     if (i < B.length) return B[i];
@@ -433,10 +477,18 @@ function chartStart(a, barsIdx){
 
 const DIFFS = [
   { name:'Easy',   bands:[0,1],     div:1, forceGrid:true,  gap:0,    melKeep:0,    pair:0.00 },
-  { name:'Normal', bands:[0,1,2],   div:4, forceGrid:false, gap:0.26, melKeep:0,    pair:0.10 },
-  { name:'Hard',   bands:[0,1,2,3], div:4, forceGrid:false, gap:0.20, melKeep:0.35, pair:0.18 },
-  { name:'Expert', bands:[0,1,2,3], div:8, forceGrid:false, gap:0.13, melKeep:1,    pair:0.26 },
+  { name:'Normal', bands:[0,1,2],   div:4, forceGrid:false, gap:0.40, melKeep:0,    pair:0.10 },
+  { name:'Hard',   bands:[0,1,2,3], div:4, forceGrid:false, gap:0.25, melKeep:0.35, pair:0.18 },
+  { name:'Expert', bands:[0,1,2,3], div:8, forceGrid:false, gap:0.16, melKeep:1,    pair:0.26 },
 ];
+
+/* The track's loudness at a moment, 1.0 being its own typical level. */
+function levelAt(a, t){
+  const L = a.level;
+  if (!L || !L.length) return 1;
+  const i = Math.round(t * (a.levelRate || 10));
+  return L[Math.max(0, Math.min(L.length-1, i))] || 0;
+}
 
 /* no diagonals */
 const DIRS = { up:[0,1], down:[0,-1], left:[-1,0], right:[1,0] };
@@ -503,8 +555,11 @@ function buildChart(a, dIdx, barsIdx){
   const kept = [];
   for (const o of byStrength){
     if (o.t < startAt - 0.02) continue;
+    /* Density follows the music: in a breakdown at 40% of the track's usual
+       level the gap more than doubles, so the blocks thin out with it. */
+    const gap = minGap / Math.max(0.35, Math.min(1, levelAt(a, o.t)));
     let clear = true;
-    for (const k of kept) if (Math.abs(k.t - o.t) < minGap){ clear = false; break; }
+    for (const k of kept) if (Math.abs(k.t - o.t) < gap){ clear = false; break; }
     if (clear) kept.push(o);
   }
   kept.sort((x,y) => x.t - y.t);
@@ -589,11 +644,12 @@ function buildChart(a, dIdx, barsIdx){
         notes.push({ t:o.t, col:1, row:r, hand:0, dir:d0, band:o.band, hit:false, spawned:false });
         notes.push({ t:o.t, col:2, row:r, hand:1, dir:d1, band:o.band, hit:false, spawned:false });
       } else {
-        /* vertical stack cut through by one hand — always a side sweep, so a
-           stack on the left takes left arrows and one on the right takes right */
+        /* Vertical stack, cut through by one hand. The swing has to travel
+           ALONG the line joining the two blocks, so a stack takes an up or a
+           down arrow — a sideways sweep passes through only one of them. */
         const r = row >= 2 ? 1 : row;
         const col = h ? (Math.random() < 0.5 ? 2 : 3) : (Math.random() < 0.5 ? 1 : 0);
-        const dir = SIDE_OF[h];
+        const dir = (r+1 >= 2) ? 'up' : (high[h] ? 'down' : 'up');
         applyDir(h, dir);
         lastCol[h] = col;
         notes.push({ t:o.t, col, row:r,   hand:h, dir, band:o.band, hit:false, spawned:false });
@@ -665,6 +721,8 @@ let metro    = localStorage.getItem('cutline2.metro') === '1';
 let barsIdx  = Number(localStorage.getItem('cutline2.bars') ?? 1);
 let wormSpin = localStorage.getItem('cutline2.worm') !== '0';   // comfort toggle
 let quantMode = Number(localStorage.getItem('cutline2.quant') ?? 1);  // 0 off · 1 auto · 2 on
+let debugOn   = localStorage.getItem('cutline2.debug') === '1';
+let beatShift = Number(localStorage.getItem('cutline2.bshift') ?? 0);   // nudge which beat is 'one'
 const QUANT_NAMES = ['off', 'auto', 'on'];
 
 const LEN = () => LENS[lenIdx];
@@ -679,6 +737,8 @@ function save(){
   localStorage.setItem('cutline2.bars', String(barsIdx));
   localStorage.setItem('cutline2.worm', wormSpin ? '1' : '0');
   localStorage.setItem('cutline2.quant', String(quantMode));
+  localStorage.setItem('cutline2.debug', debugOn ? '1' : '0');
+  localStorage.setItem('cutline2.bshift', String(beatShift));
 }
 
 function tierOf(c){
@@ -1281,6 +1341,77 @@ streakPanel.position.set(1.62, 1.62, -2.5);
 streakPanel.rotation.y = -0.55;
 scene.add(streakPanel);
 
+/* ── debug overlay ──
+   Answers one question directly: did this block cross the line on the beat it
+   was charted for, and which bar and beat was that? */
+const dbgCanvas = document.createElement('canvas');
+dbgCanvas.width = 420; dbgCanvas.height = 300;
+const dg = dbgCanvas.getContext('2d');
+const dbgTex = new THREE.CanvasTexture(dbgCanvas);
+dbgTex.colorSpace = THREE.SRGBColorSpace;
+const dbgPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.471),
+  new THREE.MeshBasicMaterial({ map:dbgTex, transparent:true }));
+dbgPanel.position.set(-1.62, 1.62, -2.5);
+dbgPanel.rotation.y = 0.55;
+dbgPanel.visible = false;
+scene.add(dbgPanel);
+
+let dbgLast = null;
+
+function paintDebug(){
+  dg.clearRect(0,0,420,300);
+  dg.fillStyle = 'rgba(8,10,16,0.86)'; dg.fillRect(0,0,420,300);
+  dg.strokeStyle = '#4ade80'; dg.lineWidth = 2;
+  dg.strokeRect(1,1,418,298);
+
+  dg.textAlign = 'left';
+  dg.font = '600 19px Inter, Helvetica, Arial';
+  dg.fillStyle = '#4ade80';
+  dg.fillText('TIMING', 18, 32);
+
+  const t = songTime();
+  const bb = chart ? barBeat(chart, t) : null;
+
+  dg.font = '600 54px Inter, Helvetica, Arial';
+  dg.fillStyle = '#eef2f7';
+  dg.fillText(bb ? `${bb.bar}\u00b7${bb.beat}` : '\u2014', 18, 92);
+  dg.font = '400 20px Inter, Helvetica, Arial';
+  dg.fillStyle = '#6f7a88';
+  dg.fillText('bar \u00b7 beat', 18, 118);
+
+  dg.textAlign = 'right';
+  dg.font = '500 26px Inter, Helvetica, Arial';
+  dg.fillStyle = '#8b93a0';
+  dg.fillText(t.toFixed(2) + 's', 402, 92);
+
+  dg.textAlign = 'left';
+  dg.font = '400 19px Inter, Helvetica, Arial';
+  dg.fillStyle = '#5f6774';
+  dg.fillText('last block at the line', 18, 158);
+
+  if (dbgLast){
+    dg.font = '600 34px Inter, Helvetica, Arial';
+    dg.fillStyle = '#ffc24a';
+    dg.fillText(`bar ${dbgLast.bar} \u00b7 beat ${dbgLast.beat}`, 18, 196);
+    const off = Math.round(dbgLast.off*1000);
+    dg.font = '500 24px Inter, Helvetica, Arial';
+    dg.fillStyle = Math.abs(off) <= 25 ? '#4ade80' : (Math.abs(off) <= 60 ? '#ffc24a' : '#ff6b8a');
+    dg.fillText(`${off>0?'+':''}${off} ms off that beat`, 18, 228);
+  } else {
+    dg.font = '500 26px Inter, Helvetica, Arial';
+    dg.fillStyle = '#3b434f';
+    dg.fillText('\u2014', 18, 196);
+  }
+
+  dg.font = '400 19px Inter, Helvetica, Arial';
+  dg.fillStyle = '#6f7a88';
+  const first = chart ? barBeat(chart, chartStart(chart, barsIdx)) : null;
+  dg.fillText(first ? `first block: bar ${first.bar} beat ${first.beat}` : '', 18, 266);
+  dg.fillStyle = '#4d5664';
+  dg.fillText(chart ? `${chart.bpm} BPM \u00b7 drift ${((chart.drift||0)*100).toFixed(1)}%` : '', 18, 288);
+  dbgTex.needsUpdate = true;
+}
+
 const TIER_COL = ['#5f6774', '#15d6ff', '#ffc24a', '#ff2d6b', '#b57bff'];
 
 function paintStreak(){
@@ -1369,21 +1500,22 @@ scene.add(menuMesh);
 const ROW_H = 72, ROW_TOP = 212;
 const LEAD_MAX = 2000;
 const NUDGES = [
-  { label:'\u2212\u2212', d:-100, x:772 },
-  { label:'\u2212',        d:-10,  x:832 },
-  { label:'+',              d:+10,  x:892 },
-  { label:'++',             d:+100, x:952 },
+  { label:'\u2212\u2212', d:-100, x:852 },
+  { label:'\u2212',        d:-10,  x:902 },
+  { label:'+',              d:+10,  x:952 },
+  { label:'++',             d:+100, x:1002 },
 ];
 
 const ACTIONS = [
   { id:'resume',  label:() => songStarted ? 'Resume' : 'Start' },
   { id:'restart', label:() => 'Restart song' },
   { id:'test',    label:() => 'Timing test' },
+  { id:'metro',   label:() => 'Metronome',     value:() => metro ? 'ON' : 'off' },
+  { id:'bshift',  label:() => 'Downbeat',      value:() => beatShift ? ('+'+beatShift) : 'auto' },
   { id:'exit',    label:() => 'Exit to desktop' },
 ];
 const SETTINGS = [
   { id:'offset',  label:() => 'Block timing', value:() => timingMs === 0 ? '0 ms' : (timingMs>0?'+'+timingMs:''+timingMs)+' ms', split:true },
-  { id:'metro',   label:() => 'Metronome',    value:() => metro ? 'ON' : 'off' },
   { id:'quant',   label:() => 'Snap to grid', value:() => QUANT_NAMES[quantMode] },
   { id:'len',     label:() => 'Hit window',   value:() => LENS[lenIdx].name },
   { id:'diff',    label:() => 'Difficulty',   value:() => DIFFS[diffIdx].name },
@@ -1391,11 +1523,12 @@ const SETTINGS = [
   { id:'bars',    label:() => 'Start after',  value:() => START_BARS[barsIdx] + ' bars' },
   { id:'flop',    label:() => 'Flaccid mode', value:() => flaccid ? 'ON' : 'off' },
   { id:'worm',    label:() => 'Wormhole spin',value:() => wormSpin ? 'ON' : 'off' },
+  { id:'debug',   label:() => 'Debug overlay', value:() => debugOn ? 'ON' : 'off' },
 ];
 let RESULT = [];
 
-const COL_A = { x0: 48,  x1: 432 };
-const COL_B = { x0: 472, x1: MW-48 };
+const COL_A = { x0: 48,  x1: 520 };
+const COL_B = { x0: 560, x1: MW-48 };
 
 function columns(){
   if (menuMode === 'result') return [{ ...COL_A, x1: MW-48, items: RESULT }];
@@ -1433,7 +1566,7 @@ function drawMenu(){
 
   if (menuMode !== 'result'){
     mg.strokeStyle = 'rgba(21,214,255,0.18)'; mg.lineWidth = 2;
-    mg.beginPath(); mg.moveTo(452, 176); mg.lineTo(452, MH-54); mg.stroke();
+    mg.beginPath(); mg.moveTo(540, 176); mg.lineTo(540, MH-54); mg.stroke();
   }
 
   columns().forEach((col, ci) => {
@@ -1510,7 +1643,7 @@ function menuPick(s){
     let side = 0;
     if (col.items[idx].split)
       for (const nz of NUDGES)
-        if (cx > nz.x - 30 && cx < nz.x + 30){ side = nz.d; break; }
+        if (cx > nz.x - 25 && cx < nz.x + 25){ side = nz.d; break; }
     return { col:ci, idx, side, dist: hit.distance };
   }
   return null;
@@ -1531,6 +1664,8 @@ function activate(id, side, s){
     case 'speed': speedIdx = (speedIdx+1)%SPEEDS.length; break;
     case 'flop':  flaccid = !flaccid; for (const q of sabers) q.inited = false; break;
     case 'worm':  wormSpin = !wormSpin; if (!wormSpin) tunnel.rotation.z = 0; break;
+    case 'debug': debugOn = !debugOn; dbgPanel.visible = debugOn; break;
+    case 'bshift': beatShift = (beatShift+1) % 4; rechartLive(); break;
     case 'exit':  renderer.xr.getSession()?.end(); break;
     case 'apply':
       timingMs = Math.round(Math.max(-LEAD_MAX, Math.min(LEAD_MAX, timingMs + testResult.median*1000)));
@@ -1628,7 +1763,7 @@ const songTime = () => ac ? (ac.currentTime - startedAt) - timingMs/1000 : 0;
 
 function resetRun(){
   for (const b of blocks){ b.grp.visible = false; b.note = null; clearTail(b); }
-  for (const n of notes){ n.hit = false; n.spawned = false; }
+  for (const n of notes){ n.hit = false; n.spawned = false; n.logged = false; }
   nextNote = 0; score = 0; combo = 0; best = 0; hits = 0; misses = 0;
   lastTier = 0; setTier(0); tierGlow = 0;
   finishing = false; metroIdx = -1;
@@ -1784,6 +1919,14 @@ function tick(dt){
     const near = THREE.MathUtils.clamp(1 + z/9, 0.4, 1);
     b.body.material.emissiveIntensity = 0.7 + near*0.7;
     b.halo.material.opacity = 0.1 + near*0.14;
+
+    /* record the bar and beat each block lands on as it reaches the line */
+    if (debugOn && !n.logged && z >= HIT_PLANE){
+      n.logged = true;
+      const bb = barBeat(chart, n.t);
+      if (bb) dbgLast = { bar:bb.bar, beat:bb.beat, off: n.t - bb.at };
+    }
+
     if (autoPlay && b.grp.position.z > HIT_PLANE && !b.note.hit){
       _wdir.set(DIRS[b.note.dir][0], DIRS[b.note.dir][1], 0);
       registerHit(b, 0.8, null, _wdir, 0.9);
@@ -1816,6 +1959,14 @@ function tick(dt){
       pulse = Math.max(0, 1 - ph*3.2);
     }
     for (const h of railHalos) h.material.opacity = 0.1 + pulse*0.38;
+
+    /* The hit line itself flashes on each beat and goes white on beat one, so
+       a block crossing can be checked against the beat by eye. */
+    const bb = barBeat(chart, t);
+    const down = bb && bb.beat === 1;
+    hitMark.material.color.setHex(down ? 0xffffff : 0xffc24a);
+    hitMark.material.opacity = 0.22 + pulse*(down ? 0.78 : 0.42);
+    hitMark.scale.y = 1 + pulse*(down ? 3.2 : 1.4);
   }
   stepRewards(dt, pulse);
 
@@ -1862,9 +2013,10 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   const nowMs = performance.now();
-  if ((hudDirty || stkDirty) && nowMs - canvasAt > 70){
+  if ((hudDirty || stkDirty || debugOn) && nowMs - canvasAt > 70){
     if (hudDirty){ paintHud(); hudDirty = false; }
     if (stkDirty){ paintStreak(); stkDirty = false; }
+    if (debugOn && renderer.xr.isPresenting) paintDebug();
     canvasAt = nowMs;
   }
   if (renderer.xr.isPresenting){
@@ -1875,7 +2027,7 @@ renderer.setAnimationLoop(() => {
   }
   if (test) tickTest(dt); else tick(dt);
   stepDebris(dt);
-  if (!renderer.xr.isPresenting){ hud.lookAt(camera.position); streakPanel.lookAt(camera.position); }
+  if (!renderer.xr.isPresenting){ hud.lookAt(camera.position); streakPanel.lookAt(camera.position); dbgPanel.lookAt(camera.position); }
   renderer.render(scene, camera);
 });
 
@@ -1893,6 +2045,7 @@ $('flop').checked = flaccid;
 $('metro').checked = metro;
 $('bars').selectedIndex = barsIdx;
 $('worm').checked = wormSpin;
+$('debug').checked = debugOn;
 
 function rechart(){
   if (!chart) return;
@@ -1925,6 +2078,7 @@ $('flop').addEventListener('change', e => {
 $('metro').addEventListener('change', e => { metro = e.target.checked; save(); });
 $('bars').addEventListener('change', e => { barsIdx = Number(e.target.value); save(); rechart(); });
 $('worm').addEventListener('change', e => { wormSpin = e.target.checked; save(); });
+$('debug').addEventListener('change', e => { debugOn = e.target.checked; save(); });
 
 /* A chart is just onsets + tempo, so it can be computed once on a fast machine,
    committed next to the MP3, and loaded instantly in the headset. Difficulty
@@ -2034,11 +2188,15 @@ btnVR.addEventListener('click', async () => {
     hud.position.set(0, 2.25, -3.2); hud.rotation.set(0,0,0);
     streakPanel.position.set(1.62, 1.62, -2.5);
     streakPanel.rotation.set(0, -0.55, 0);
+    dbgPanel.position.set(-1.62, 1.62, -2.5);
+    dbgPanel.rotation.set(0, 0.55, 0);
+    dbgPanel.visible = debugOn; dbgLast = null;
     setTier(0); lastTier = 0; tierGlow = 0;
     setTimeout(() => openMenu('main'), 700);
     session.addEventListener('end', () => {
       killSource(); playing = false; finishing = false; closeMenu(); test = null;
       for (const s of sabers) hideSaber(s);
+      dbgPanel.visible = false;
       ui.style.display = 'flex';
       $('diff').selectedIndex = diffIdx;
       $('speed').selectedIndex = speedIdx;
@@ -2047,6 +2205,7 @@ btnVR.addEventListener('click', async () => {
       $('metro').checked = metro;
       $('bars').selectedIndex = barsIdx;
       $('worm').checked = wormSpin;
+      $('debug').checked = debugOn;
       say(`Run over — ${hits} hit, ${misses} missed, best streak ${best}. Block timing ${timingMs} ms.`);
     });
   } catch(err){ say('Could not start: ' + err.message, true); }
