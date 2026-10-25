@@ -82,6 +82,14 @@
   <label class="check"><input type="checkbox" id="flop"> Flaccid mode — rubber sabers</label>
   <label class="check"><input type="checkbox" id="metro"> Metronome — click on every detected beat</label>
 
+  <div style="margin-bottom:14px">
+    <label for="bars">Start after</label>
+    <select id="bars">
+      <option value="0">2 bars</option><option value="1" selected>3 bars</option>
+      <option value="2">4 bars</option><option value="3">8 bars</option>
+    </select>
+  </div>
+
   <p class="legend">
     <b>Easy</b> — kick and snare only, locked to the quarter note.<br>
     <b>Normal</b> — the full kit, exactly where it lands.<br>
@@ -240,6 +248,22 @@ async function analyze(buf, onProgress){
     if (sc > phScore){ phScore = sc; phase = ph; }
   }
   phase += CENTRE;
+
+  /* Which of the four beats is the downbeat? Assume 4/4 and pick the offset
+     where the kick lands hardest — that's almost always beat one. */
+  let downK = 0, dbScore = -1;
+  for (let k=0;k<4;k++){
+    let sc = 0;
+    for (let t = phase + k*beat; t*fps < frames; t += beat*4){
+      const f = Math.round(t*fps);
+      if (f >= 0 && f < frames) sc += env[0][f] + env[1][f]*0.4;
+    }
+    if (sc > dbScore){ dbScore = sc; downK = k; }
+  }
+  const barLen = beat*4;
+  let bar0 = phase + downK*beat;
+  while (bar0 - barLen > 0) bar0 -= barLen;   // first downbeat in the track
+
   onProgress(0.9); await yieldFrame();
 
   const W = 20, onsets = [];
@@ -260,12 +284,23 @@ async function analyze(buf, onProgress){
     }
   }
   onProgress(1);
-  return { onsets, bpm: Math.round(60/beat), beat, phase, duration: buf.duration };
+  return { onsets, bpm: Math.round(60/beat), beat, phase, bar0, barLen, duration: buf.duration };
 }
 
 /* ══════════════════ difficulty → chart ══════════════════ */
 
-const LEAD_IN = 3.2;          // quiet run-up before the first block, like Beat Saber
+/* How many whole bars of music play before the first block. The first block
+   is then forced onto beat one of that bar, so you come in on a downbeat. */
+const START_BARS = [2, 3, 4, 8];
+
+function chartStart(a, barsIdx){
+  const barLen = a.barLen || a.beat*4;
+  const bar0 = a.bar0 ?? a.phase ?? 0;
+  let bars = START_BARS[barsIdx];
+  let t = bar0 + bars*barLen;
+  while (t < 2.2){ bars++; t = bar0 + bars*barLen; }   // need room to fly in
+  return t;
+}
 
 const DIFFS = [
   { name:'Easy',   bands:[0,1],     div:1, forceGrid:true,  gap:0,    melKeep:0,    pair:0.00 },
@@ -278,9 +313,10 @@ const DIFFS = [
 const DIRS = { up:[0,1], down:[0,-1], left:[-1,0], right:[1,0] };
 const DIR_ANGLE = { up:0, right:-Math.PI/2, down:Math.PI, left:Math.PI/2 };
 
-function buildChart(a, dIdx){
+function buildChart(a, dIdx, barsIdx){
   const D = DIFFS[dIdx];
   const { onsets, beat, phase } = a;
+  const startAt = chartStart(a, barsIdx);
   const step = beat / D.div;
   let pool = onsets.filter(o => D.bands.includes(o.band));
 
@@ -313,12 +349,16 @@ function buildChart(a, dIdx){
   const byStrength = pool.slice().sort((x,y) => y.strength - x.strength);
   const kept = [];
   for (const o of byStrength){
-    if (o.t < LEAD_IN) continue;
+    if (o.t < startAt - 0.02) continue;
     let clear = true;
     for (const k of kept) if (Math.abs(k.t - o.t) < minGap){ clear = false; break; }
     if (clear) kept.push(o);
   }
   kept.sort((x,y) => x.t - y.t);
+
+  /* always open on the downbeat, even if nothing was detected right there */
+  if (!kept.length || kept[0].t > startAt + 0.08)
+    kept.unshift({ t: startAt, band: 0, strength: 1 });
 
   const ROW_OF = [0,1,2,1];
   const notes = [];
@@ -383,22 +423,24 @@ const TIERS = [
   { at:30, mult:8, name:'8×' },
 ];
 
-let diffIdx  = Number(localStorage.getItem('cutline.diff')  ?? 1);
-let speedIdx = Number(localStorage.getItem('cutline.speed') ?? 1);
-let lenIdx   = Number(localStorage.getItem('cutline.len')   ?? 2);
-let syncOffsetMs = Number(localStorage.getItem('cutline.offset') || 0);
-let flaccid  = localStorage.getItem('cutline.flop') === '1';
-let metro    = localStorage.getItem('cutline.metro') === '1';
+let diffIdx  = Number(localStorage.getItem('cutline2.diff')  ?? 1);
+let speedIdx = Number(localStorage.getItem('cutline2.speed') ?? 1);
+let lenIdx   = Number(localStorage.getItem('cutline2.len')   ?? 2);
+let timingMs = Number(localStorage.getItem('cutline2.timing') || 0);  // + = blocks arrive LATER
+let flaccid  = localStorage.getItem('cutline2.flop') === '1';
+let metro    = localStorage.getItem('cutline2.metro') === '1';
+let barsIdx  = Number(localStorage.getItem('cutline2.bars') ?? 1);
 
 const LEN = () => LENS[lenIdx];
 const speed = () => SPEEDS[speedIdx].v;
 function save(){
-  localStorage.setItem('cutline.diff', String(diffIdx));
-  localStorage.setItem('cutline.speed', String(speedIdx));
-  localStorage.setItem('cutline.len', String(lenIdx));
-  localStorage.setItem('cutline.offset', String(syncOffsetMs));
-  localStorage.setItem('cutline.flop', flaccid ? '1' : '0');
-  localStorage.setItem('cutline.metro', metro ? '1' : '0');
+  localStorage.setItem('cutline2.diff', String(diffIdx));
+  localStorage.setItem('cutline2.speed', String(speedIdx));
+  localStorage.setItem('cutline2.len', String(lenIdx));
+  localStorage.setItem('cutline2.timing', String(timingMs));
+  localStorage.setItem('cutline2.flop', flaccid ? '1' : '0');
+  localStorage.setItem('cutline2.metro', metro ? '1' : '0');
+  localStorage.setItem('cutline2.bars', String(barsIdx));
 }
 
 function tierOf(c){
@@ -1005,8 +1047,9 @@ const MAIN = [
   { id:'resume',  label:() => songStarted ? 'Resume' : 'Start' },
   { id:'restart', label:() => 'Restart song' },
   { id:'test',    label:() => 'Timing test' },
-  { id:'offset',  label:() => 'Block lead', value:() => (syncOffsetMs>0?'+':'')+syncOffsetMs+' ms', split:true },
+  { id:'offset',  label:() => 'Block timing', value:() => timingMs === 0 ? '0 ms' : (timingMs>0?'+'+timingMs+' ms later':timingMs+' ms earlier'), split:true },
   { id:'metro',   label:() => 'Metronome', value:() => metro ? 'ON' : 'off' },
+  { id:'bars',    label:() => 'Start after', value:() => START_BARS[barsIdx] + ' bars' },
   { id:'len',     label:() => 'Hit window', value:() => LENS[lenIdx].name },
   { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
   { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
@@ -1120,15 +1163,16 @@ function activate(id, side, s){
     case 'restart': startSong(); closeMenu(); break;
     case 'test': startTimingTest(); break;
     case 'offset':
-      syncOffsetMs = Math.max(-LEAD_MAX, Math.min(LEAD_MAX, syncOffsetMs + (side || 10))); break;
+      timingMs = Math.max(-LEAD_MAX, Math.min(LEAD_MAX, timingMs + (side || 10))); break;
     case 'metro': metro = !metro; break;
+    case 'bars':  barsIdx = (barsIdx+1)%START_BARS.length; rechartLive(); break;
     case 'len':   lenIdx = (lenIdx+1)%LENS.length; break;
     case 'diff':  diffIdx = (diffIdx+1)%DIFFS.length; rechartLive(); break;
     case 'speed': speedIdx = (speedIdx+1)%SPEEDS.length; break;
     case 'flop':  flaccid = !flaccid; for (const q of sabers) q.inited = false; break;
     case 'exit':  renderer.xr.getSession()?.end(); break;
     case 'apply':
-      syncOffsetMs = Math.round(Math.max(-LEAD_MAX, Math.min(LEAD_MAX, syncOffsetMs - testResult.median*1000)));
+      timingMs = Math.round(Math.max(-LEAD_MAX, Math.min(LEAD_MAX, timingMs + testResult.median*1000)));
       testResult = null; openMenu('main'); break;
     case 'again': startTimingTest(); break;
     case 'back':  testResult = null; openMenu('main'); break;
@@ -1150,7 +1194,7 @@ function click(at, hi){
 }
 
 /* ── timing test ── */
-const testTime = () => ac.currentTime + syncOffsetMs/1000;
+const testTime = () => ac.currentTime - timingMs/1000;
 
 function startTimingTest(){
   killSource(); playing = false;
@@ -1162,7 +1206,7 @@ function startTimingTest(){
   for (let i=0;i<n;i++){
     const T = t0 + i*period;
     test.times.push(T);
-    click(T - syncOffsetMs/1000, true);
+    click(T + timingMs/1000, true);
   }
   drawHud();
 }
@@ -1175,7 +1219,7 @@ function finishTest(){
     testResult = { median: e[Math.floor(n/2)], n };
     const m = Math.round(testResult.median*1000);
     RESULT = [
-      { id:'apply', label:() => `Apply  →  ${syncOffsetMs - m} ms offset` },
+      { id:'apply', label:() => `Apply  →  ${timingMs + m} ms` },
       { id:'again', label:() => 'Run the test again' },
       { id:'back',  label:() => 'Keep current offset' },
     ];
@@ -1219,7 +1263,7 @@ function tickTest(dt){
 let notes = [], nextNote = 0, playing = false, startedAt = 0, source = null;
 let autoPlay = false, pausedAt = 0, finishing = false, metroNext = 0;
 
-const songTime = () => ac ? (ac.currentTime - startedAt) + syncOffsetMs/1000 : 0;
+const songTime = () => ac ? (ac.currentTime - startedAt) - timingMs/1000 : 0;
 
 function resetRun(){
   for (const b of blocks){ b.grp.visible = false; b.note = null; }
@@ -1445,16 +1489,18 @@ $('speed').selectedIndex = speedIdx;
 $('len').selectedIndex = lenIdx;
 $('flop').checked = flaccid;
 $('metro').checked = metro;
+$('bars').selectedIndex = barsIdx;
 
 function rechart(){
   if (!chart) return;
-  notes = buildChart(chart, diffIdx);
+  notes = buildChart(chart, diffIdx, barsIdx);
   const per = (notes.length/chart.duration).toFixed(1);
-  say(`${notes.length} blocks · ${per}/sec · ~${bpm} BPM · ${Math.round(chart.duration)}s.`);
+  const s0 = chartStart(chart, barsIdx).toFixed(1);
+  say(`${notes.length} blocks · ${per}/sec · ~${bpm} BPM · first block at ${s0}s.`);
 }
 function rechartLive(){
   if (!chart) return;
-  notes = buildChart(chart, diffIdx);
+  notes = buildChart(chart, diffIdx, barsIdx);
   nextNote = 0;
   for (const b of blocks){ b.grp.visible = false; b.note = null; }
   const t = songTime();
@@ -1469,6 +1515,7 @@ $('flop').addEventListener('change', e => {
   for (const s of sabers) s.inited = false;
 });
 $('metro').addEventListener('change', e => { metro = e.target.checked; save(); });
+$('bars').addEventListener('change', e => { barsIdx = Number(e.target.value); save(); rechart(); });
 
 /* A chart is just onsets + tempo, so it can be computed once on a fast machine,
    committed next to the MP3, and loaded instantly in the headset. Difficulty
@@ -1587,7 +1634,8 @@ btnVR.addEventListener('click', async () => {
       $('len').selectedIndex = lenIdx;
       $('flop').checked = flaccid;
       $('metro').checked = metro;
-      say(`Run over — ${hits} hit, ${misses} missed, best streak ${best}. Offset ${syncOffsetMs} ms.`);
+      $('bars').selectedIndex = barsIdx;
+      say(`Run over — ${hits} hit, ${misses} missed, best streak ${best}. Block timing ${timingMs} ms.`);
     });
   } catch(err){ say('Could not start: ' + err.message, true); }
 });
