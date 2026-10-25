@@ -515,33 +515,102 @@ function buildChart(a, dIdx, barsIdx){
 
   const ROW_OF = [0,1,2,1];
   const notes = [];
-  let hand = 0, lastCol = [1,2], lastPair = -9;
+
+  /* ── swing flow ──────────────────────────────────────────────
+     Parity is the rule real mappers chart by: a hand alternates up-cuts and
+     down-cuts so the arm keeps swinging through the music instead of resetting
+     between notes. A side cut sweeps across without changing how high the hand
+     ends up, so it is parity-neutral and makes a natural connector.
+       · left hand  may cut up, down or left   · right hand up, down or right
+       · a top-row block is never a down-cut (you'd have to raise the hand
+         above your head first); a bottom-row block is never an up-cut
+       · a hand already high gets a down-cut next, and vice versa          */
+  const SIDE_OF = ['left', 'right'];
+
+  function dirsFor(hand, row){
+    const side = SIDE_OF[hand];
+    if (row >= 2) return ['up', side];       // high: no overhead reset
+    if (row <= 0) return ['down', side];     // low: no cut up off the floor
+    return ['up', 'down', side];
+  }
+
+  const high = [false, true];      // where each hand currently sits
+  const sideRun = [0, 0];          // consecutive side cuts, kept short
+
+  function pickDir(hand, row){
+    const side = SIDE_OF[hand];
+    const allowed = dirsFor(hand, row);
+    const want = high[hand] ? 'down' : 'up';
+    const canSide = allowed.includes(side) && sideRun[hand] < 1;
+
+    /* a side cut now and then stops it metronoming up-down-up-down */
+    if (canSide && Math.random() < 0.20){ sideRun[hand]++; return side; }
+
+    if (allowed.includes(want)){ sideRun[hand] = 0; return want; }
+
+    /* The row forbids the parity direction — a run of top-row notes with the
+       hand already high, say. Sweep across once, then take the vertical this
+       row does allow, rather than sliding sideways forever. */
+    if (canSide){ sideRun[hand]++; return side; }
+    sideRun[hand] = 0;
+    return allowed.find(d => d !== side) || allowed[0];
+  }
+
+  function applyDir(hand, dir){
+    if (dir === 'up') high[hand] = true;
+    else if (dir === 'down') high[hand] = false;
+    /* a side cut leaves the hand where it was */
+  }
+
+  let hand = 0, lastCol = [1,2], lastPair = -9, lastCross = -9;
 
   for (const o of kept){
     const row = ROW_OF[o.band];
     hand ^= 1;
     const h = hand;
 
-    /* doubles: a two-hand pair side by side, or a stack one hand cuts through */
+    /* ── doubles ── */
     const canPair = o.strength > 0.62 && o.t - lastPair > beat*1.5 && Math.random() < D.pair;
     if (canPair){
       lastPair = o.t;
+
       if (Math.random() < 0.55){
-        const dir = row === 2 ? 'down' : 'up';
-        notes.push({ t:o.t, col:1, row, hand:0, dir, band:o.band, hit:false, spawned:false });
-        notes.push({ t:o.t, col:2, row, hand:1, dir, band:o.band, hit:false, spawned:false });
+        /* side by side, red left and blue right: vertical arrows only, so the
+           arms move together or in opposition rather than tangling */
+        const r = Math.min(row, 1);
+        let d0 = high[0] ? 'down' : 'up';
+        let d1 = high[1] ? 'down' : 'up';
+        if (r >= 2){ d0 = 'up'; d1 = 'up'; }
+        if (Math.random() < 0.45){                  // both the same way
+          const d = Math.random() < 0.5 ? 'up' : 'down';
+          d0 = d; d1 = d;
+        }
+        applyDir(0, d0); applyDir(1, d1);
+        notes.push({ t:o.t, col:1, row:r, hand:0, dir:d0, band:o.band, hit:false, spawned:false });
+        notes.push({ t:o.t, col:2, row:r, hand:1, dir:d1, band:o.band, hit:false, spawned:false });
       } else {
-        const r = row === 2 ? 1 : row;
-        const dir = Math.random() < 0.5 ? 'up' : 'down';
-        const col = h ? 2 : 1;
+        /* vertical stack cut through by one hand — always a side sweep, so a
+           stack on the left takes left arrows and one on the right takes right */
+        const r = row >= 2 ? 1 : row;
+        const col = h ? (Math.random() < 0.5 ? 2 : 3) : (Math.random() < 0.5 ? 1 : 0);
+        const dir = SIDE_OF[h];
+        applyDir(h, dir);
+        lastCol[h] = col;
         notes.push({ t:o.t, col, row:r,   hand:h, dir, band:o.band, hit:false, spawned:false });
         notes.push({ t:o.t, col, row:r+1, hand:h, dir, band:o.band, hit:false, spawned:false });
       }
       continue;
     }
 
+    /* ── single block ── */
+    /* a crossover now and then: the left hand reaching right, or the reverse.
+       Rare, never back to back, and never straight after a double. */
+    const cross = o.t - lastCross > beat*6 && o.t - lastPair > beat*2 && Math.random() < 0.08;
+    if (cross) lastCross = o.t;
+
     let col;
-    if (o.band === 3) col = h ? 3 : 0;
+    if (o.band === 3) col = h ? 3 : 0;          // melodic sits wide
+    else if (cross)   col = h ? (Math.random() < 0.6 ? 1 : 0) : (Math.random() < 0.6 ? 2 : 3);
     else {
       const base = h ? 2 : 1;
       col = base + (Math.random() < 0.45 ? (h?1:-1) : 0);
@@ -550,12 +619,11 @@ function buildChart(a, dIdx, barsIdx){
     }
     lastCol[h] = col;
 
-    let dir;
-    if (o.band === 0) dir = 'up';
-    else if (o.band === 2) dir = 'down';
-    else dir = h ? 'left' : 'right';
-    notes.push({ t:o.t, col, row, hand:h, dir, band:o.band, hit:false, spawned:false });
+    const dir = pickDir(h, row);
+    applyDir(h, dir);
+    notes.push({ t:o.t, col, row, hand:h, dir, band:o.band, cross, hit:false, spawned:false });
   }
+
   notes.sort((x,y) => x.t - y.t);
 
   /* A note with room to breathe before the next one is a sustain — give it a
@@ -671,7 +739,7 @@ scene.add(hitMark);
 /* ── reward layers, unlocked by streak tier ── */
 
 const stars = (() => {
-  const n = 600, pos = new Float32Array(n*3);
+  const n = 380, pos = new Float32Array(n*3);
   for (let i=0;i<n;i++){
     pos[i*3]   = (Math.random()-0.5)*26;
     pos[i*3+1] = Math.random()*11 - 1;
@@ -863,7 +931,7 @@ function dotTexture(){
 }
 const arrowTex = arrowTexture(), dotTex = dotTexture();
 
-const POOL = 54, blocks = [];
+const POOL = 40, blocks = [];
 const arrowGeo = new THREE.PlaneGeometry(BLOCK*0.6, BLOCK*0.6);
 for (let i=0;i<POOL;i++){
   const g = new THREE.Group();
@@ -883,7 +951,7 @@ for (let i=0;i<POOL;i++){
 
   /* tracer stream for sustained notes */
   const tail = [];
-  for (let k=0;k<8;k++){
+  for (let k=0;k<5;k++){
     const m = new THREE.Mesh(new THREE.BoxGeometry(BLOCK*0.5, BLOCK*0.5, BLOCK*0.5),
       new THREE.MeshBasicMaterial({ color:RED, transparent:true, opacity:0,
         blending:THREE.AdditiveBlending, depthWrite:false }));
@@ -896,7 +964,7 @@ for (let i=0;i<POOL;i++){
 function clearTail(b){ for (const m of b.tail) m.visible = false; }
 
 /* ── debris ── */
-const SHARDS = 240, shards = [];
+const SHARDS = 160, shards = [];
 const shardGeo = new THREE.BoxGeometry(1,1,1);
 for (let i=0;i<SHARDS;i++){
   const m = new THREE.Mesh(shardGeo, new THREE.MeshBasicMaterial({
@@ -1162,7 +1230,13 @@ const hud = new THREE.Mesh(new THREE.PlaneGeometry(1.1,0.365),
 hud.position.set(0, 2.25, -3.2);
 scene.add(hud);
 
-function drawHud(msg){
+/* Canvas text plus a texture upload is expensive, and a dense chart was
+   doing both on every single hit. Mark dirty, paint on a timer instead. */
+let hudMsg = null, hudDirty = true, stkDirty = true, canvasAt = 0;
+function drawHud(msg){ if (msg !== undefined) hudMsg = msg || null; hudDirty = true; }
+function drawStreak(){ stkDirty = true; }
+
+function paintHud(){
   const g = hudCtx;
   g.clearRect(0,0,512,170);
   g.textAlign = 'center';
@@ -1188,7 +1262,7 @@ function drawHud(msg){
   g.shadowBlur = 0;
   g.font = '500 28px Inter, Helvetica, Arial';
   g.fillStyle = '#5f6774';
-  g.fillText(msg || (hits + ' hit · ' + misses + ' missed'), 256, 112);
+  g.fillText(hudMsg || (hits + ' hit · ' + misses + ' missed'), 256, 112);
   g.font = '400 22px Inter, Helvetica, Arial';
   g.fillStyle = '#6f7a88';
   g.fillText(hits + ' hit · ' + misses + ' missed', 256, 150);
@@ -1209,7 +1283,7 @@ scene.add(streakPanel);
 
 const TIER_COL = ['#5f6774', '#15d6ff', '#ffc24a', '#ff2d6b', '#b57bff'];
 
-function drawStreak(){
+function paintStreak(){
   const t = tierOf(combo);
   const col = TIER_COL[t];
   sg.clearRect(0,0,360,460);
@@ -1279,43 +1353,57 @@ function checkTier(s){
 
 /* ══════════════════ menu ══════════════════ */
 
-const MW = 1024, MH = 1040;
+const MW = 1240, MH = 900;
 const menuCanvas = document.createElement('canvas');
 menuCanvas.width = MW; menuCanvas.height = MH;
 const mg = menuCanvas.getContext('2d');
 const menuTex = new THREE.CanvasTexture(menuCanvas);
 menuTex.colorSpace = THREE.SRGBColorSpace;
-const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.168),
+const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.34, 0.973),
   new THREE.MeshBasicMaterial({ map:menuTex, transparent:true }));
 menuMesh.visible = false;
 scene.add(menuMesh);
 
-const ROW_H = 76, ROW_TOP = 192;
-/* coarse and fine nudge zones for the block-lead row */
+/* Two columns: actions on the left, settings on the right. One tall column
+   overflowed the canvas and put Exit past the bottom edge, unreachable. */
+const ROW_H = 72, ROW_TOP = 212;
 const LEAD_MAX = 2000;
 const NUDGES = [
-  { label:'−−', d:-100, x:MW-500 },
-  { label:'−',  d:-10,  x:MW-430 },
-  { label:'+',  d:+10,  x:MW-360 },
-  { label:'++', d:+100, x:MW-290 },
+  { label:'\u2212\u2212', d:-100, x:772 },
+  { label:'\u2212',        d:-10,  x:832 },
+  { label:'+',              d:+10,  x:892 },
+  { label:'++',             d:+100, x:952 },
 ];
-const MAIN = [
+
+const ACTIONS = [
   { id:'resume',  label:() => songStarted ? 'Resume' : 'Start' },
   { id:'restart', label:() => 'Restart song' },
   { id:'test',    label:() => 'Timing test' },
-  { id:'offset',  label:() => 'Block timing', value:() => timingMs === 0 ? '0 ms' : (timingMs>0?'+'+timingMs+' ms later':timingMs+' ms earlier'), split:true },
-  { id:'metro',   label:() => 'Metronome', value:() => metro ? 'ON' : 'off' },
-  { id:'bars',    label:() => 'Start after', value:() => START_BARS[barsIdx] + ' bars' },
-  { id:'quant',   label:() => 'Snap to grid', value:() => QUANT_NAMES[quantMode] },
-  { id:'len',     label:() => 'Hit window', value:() => LENS[lenIdx].name },
-  { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
-  { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
-  { id:'flop',    label:() => 'Flaccid mode', value:() => flaccid ? 'ON' : 'off' },
-  { id:'worm',    label:() => 'Wormhole spin', value:() => wormSpin ? 'ON' : 'off' },
   { id:'exit',    label:() => 'Exit to desktop' },
 ];
+const SETTINGS = [
+  { id:'offset',  label:() => 'Block timing', value:() => timingMs === 0 ? '0 ms' : (timingMs>0?'+'+timingMs:''+timingMs)+' ms', split:true },
+  { id:'metro',   label:() => 'Metronome',    value:() => metro ? 'ON' : 'off' },
+  { id:'quant',   label:() => 'Snap to grid', value:() => QUANT_NAMES[quantMode] },
+  { id:'len',     label:() => 'Hit window',   value:() => LENS[lenIdx].name },
+  { id:'diff',    label:() => 'Difficulty',   value:() => DIFFS[diffIdx].name },
+  { id:'speed',   label:() => 'Block speed',  value:() => SPEEDS[speedIdx].name },
+  { id:'bars',    label:() => 'Start after',  value:() => START_BARS[barsIdx] + ' bars' },
+  { id:'flop',    label:() => 'Flaccid mode', value:() => flaccid ? 'ON' : 'off' },
+  { id:'worm',    label:() => 'Wormhole spin',value:() => wormSpin ? 'ON' : 'off' },
+];
 let RESULT = [];
-const items = () => menuMode === 'result' ? RESULT : MAIN;
+
+const COL_A = { x0: 48,  x1: 432 };
+const COL_B = { x0: 472, x1: MW-48 };
+
+function columns(){
+  if (menuMode === 'result') return [{ ...COL_A, x1: MW-48, items: RESULT }];
+  return [ { ...COL_A, items: ACTIONS }, { ...COL_B, items: SETTINGS } ];
+}
+
+let hoverCol = -1;
+const itemAt = (c, i) => { const cs = columns(); return cs[c] && cs[c].items[i]; };
 
 function drawMenu(){
   mg.clearRect(0,0,MW,MH);
@@ -1330,47 +1418,55 @@ function drawMenu(){
   mg.fillStyle = '#eef2f7';
   mg.font = '600 52px Inter, Helvetica, Arial';
   mg.shadowColor = '#15d6ff'; mg.shadowBlur = 16;
-  mg.fillText(menuMode === 'result' ? 'Timing result' : 'Cutline', MW/2, 78);
+  mg.fillText(menuMode === 'result' ? 'Timing result' : 'Cutline', MW/2, 82);
   mg.shadowBlur = 0;
 
   mg.font = '400 26px Inter, Helvetica, Arial';
   mg.fillStyle = '#8b93a0';
   if (menuMode === 'result' && testResult){
     const m = Math.round(testResult.median*1000);
-    mg.fillText(`You sliced ${Math.abs(m)} ms ${m>0?'late':'early'} over ${testResult.n} hits.`, MW/2, 128);
+    mg.fillText(`You sliced ${Math.abs(m)} ms ${m>0?'late':'early'} over ${testResult.n} hits.`, MW/2, 136);
   } else {
-    mg.fillText(score > 0 ? (score.toLocaleString()+' · '+hits+'/'+(hits+misses)+' · best streak '+best)
-                          : 'Point and pull the trigger', MW/2, 128);
+    mg.fillText(score > 0 ? (score.toLocaleString()+' \u00b7 '+hits+'/'+(hits+misses)+' \u00b7 best streak '+best)
+                          : 'Point and pull the trigger', MW/2, 136);
   }
 
-  items().forEach((it, i) => {
-    const y = ROW_TOP + i*ROW_H;
-    const on = i === hoverIdx;
-    if (on){
-      mg.fillStyle = 'rgba(21,214,255,0.14)';
-      mg.fillRect(48, y-44, MW-96, ROW_H-8);
-      mg.strokeStyle = 'rgba(21,214,255,0.5)'; mg.lineWidth = 2;
-      mg.strokeRect(48, y-44, MW-96, ROW_H-8);
-    }
-    mg.textAlign = 'left';
-    mg.font = '500 36px Inter, Helvetica, Arial';
-    mg.fillStyle = it.id === 'exit' ? '#ff6b8a' : (on ? '#ffffff' : '#c9d2de');
-    mg.fillText(it.label(), 82, y);
-    if (it.value){
-      const v = it.value();
-      mg.textAlign = 'right';
-      mg.fillStyle = (v === 'off') ? '#4d5664' : '#ffc24a';
-      mg.font = '600 34px Inter, Helvetica, Arial';
-      mg.fillText(v, MW-82, y);
-      if (it.split){
-        mg.textAlign = 'center';
-        mg.font = '600 30px Inter, Helvetica, Arial';
-        NUDGES.forEach(nz => {
-          mg.fillStyle = on && hoverSide === nz.d ? '#ffffff' : '#4d5664';
-          mg.fillText(nz.label, nz.x, y);
-        });
+  if (menuMode !== 'result'){
+    mg.strokeStyle = 'rgba(21,214,255,0.18)'; mg.lineWidth = 2;
+    mg.beginPath(); mg.moveTo(452, 176); mg.lineTo(452, MH-54); mg.stroke();
+  }
+
+  columns().forEach((col, ci) => {
+    col.items.forEach((it, i) => {
+      const y = ROW_TOP + i*ROW_H;
+      const on = ci === hoverCol && i === hoverIdx;
+      if (on){
+        mg.fillStyle = 'rgba(21,214,255,0.14)';
+        mg.fillRect(col.x0, y-42, col.x1-col.x0, ROW_H-10);
+        mg.strokeStyle = 'rgba(21,214,255,0.5)'; mg.lineWidth = 2;
+        mg.strokeRect(col.x0, y-42, col.x1-col.x0, ROW_H-10);
       }
-    }
+      mg.textAlign = 'left';
+      mg.font = '500 34px Inter, Helvetica, Arial';
+      mg.fillStyle = it.id === 'exit' ? '#ff6b8a' : (on ? '#ffffff' : '#c9d2de');
+      mg.fillText(it.label(), col.x0 + 22, y);
+
+      if (it.value){
+        const v = it.value();
+        mg.textAlign = 'right';
+        mg.fillStyle = (v === 'off') ? '#4d5664' : '#ffc24a';
+        mg.font = '600 32px Inter, Helvetica, Arial';
+        mg.fillText(v, col.x1 - 22, y);
+        if (it.split){
+          mg.textAlign = 'center';
+          mg.font = '600 30px Inter, Helvetica, Arial';
+          for (const nz of NUDGES){
+            mg.fillStyle = on && hoverSide === nz.d ? '#ffffff' : '#4d5664';
+            mg.fillText(nz.label, nz.x, y);
+          }
+        }
+      }
+    });
   });
   menuTex.needsUpdate = true;
 }
@@ -1383,7 +1479,7 @@ function openMenu(mode){
   const p = new THREE.Vector3(), q = new THREE.Quaternion();
   head.getWorldPosition(p); head.getWorldQuaternion(q);
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(q);
-  menuMesh.position.copy(p).addScaledVector(fwd, 1.6);
+  menuMesh.position.copy(p).addScaledVector(fwd, 1.75);
   menuMesh.position.y = Math.max(1.0, p.y - 0.08);
   menuMesh.lookAt(p);
   menuMesh.visible = true;
@@ -1391,7 +1487,7 @@ function openMenu(mode){
   drawMenu();
 }
 function closeMenu(){
-  menuOpen = false; hoverIdx = -1;
+  menuOpen = false; hoverIdx = -1; hoverCol = -1;
   menuMesh.visible = false;
   for (const s of sabers){ s.ray.visible = false; s.inited = false; }
 }
@@ -1405,14 +1501,19 @@ function menuPick(s){
   const hit = raycaster.intersectObject(menuMesh, false)[0];
   if (!hit || !hit.uv) return null;
   const cx = hit.uv.x*MW, cy = (1-hit.uv.y)*MH;
-  const idx = Math.floor((cy - (ROW_TOP-48))/ROW_H);
-  if (idx < 0 || idx >= items().length) return null;
-  if (cx < 48 || cx > MW-48) return null;
-  let side = 0;
-  if (items()[idx].split)
-    for (const nz of NUDGES)
-      if (cx > nz.x - 35 && cx < nz.x + 35){ side = nz.d; break; }
-  return { idx, side, dist: hit.distance };
+  const idx = Math.floor((cy - (ROW_TOP-46))/ROW_H);
+  const cols = columns();
+  for (let ci=0; ci<cols.length; ci++){
+    const col = cols[ci];
+    if (cx < col.x0 || cx > col.x1) continue;
+    if (idx < 0 || idx >= col.items.length) return null;
+    let side = 0;
+    if (col.items[idx].split)
+      for (const nz of NUDGES)
+        if (cx > nz.x - 30 && cx < nz.x + 30){ side = nz.d; break; }
+    return { col:ci, idx, side, dist: hit.distance };
+  }
+  return null;
 }
 
 function activate(id, side, s){
@@ -1736,8 +1837,10 @@ function handleButtons(){
       else openMenu('main');
     }
     s.wasMenu = menuBtn;
-    if (trig && !s.wasTrig && menuOpen && hoverIdx >= 0)
-      activate(items()[hoverIdx].id, hoverSide, s);
+    if (trig && !s.wasTrig && menuOpen && hoverIdx >= 0 && hoverCol >= 0){
+      const it = itemAt(hoverCol, hoverIdx);
+      if (it) activate(it.id, hoverSide, s);
+    }
     s.wasTrig = trig;
   }
   if (menuOpen){
@@ -1748,13 +1851,22 @@ function handleButtons(){
       if (p && (!found || p.dist < found.dist)) found = p;
     }
     const ni = found ? found.idx : -1, ns = found ? found.side : 0;
-    if (ni !== hoverIdx || ns !== hoverSide){ hoverIdx = ni; hoverSide = ns; drawMenu(); }
+    const nc = found ? found.col : -1;
+    if (ni !== hoverIdx || ns !== hoverSide || nc !== hoverCol){
+      hoverIdx = ni; hoverSide = ns; hoverCol = nc; drawMenu();
+    }
   }
 }
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
+  const nowMs = performance.now();
+  if ((hudDirty || stkDirty) && nowMs - canvasAt > 70){
+    if (hudDirty){ paintHud(); hudDirty = false; }
+    if (stkDirty){ paintStreak(); stkDirty = false; }
+    canvasAt = nowMs;
+  }
   if (renderer.xr.isPresenting){
     handleButtons();
     for (const s of sabers){ if (s.src) updateSaber(s, dt); else hideSaber(s); }
