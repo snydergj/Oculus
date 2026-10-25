@@ -28,7 +28,7 @@
   select,input[type=file]{font:inherit;font-size:14px;color:var(--ink);background:#1b202a;
     border:1px solid #28303d;border-radius:3px;padding:8px 10px;width:100%}
   .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px}
-  .check{display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dim);margin-bottom:16px;cursor:pointer}
+  .check{display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dim);margin-bottom:8px;cursor:pointer}
   .check input{accent-color:var(--blue);width:17px;height:17px}
   .bar{height:3px;background:#1b202a;border-radius:2px;overflow:hidden;margin:12px 0}
   .bar i{display:block;height:100%;width:0;background:var(--blue);transition:width .15s}
@@ -37,7 +37,7 @@
   .hint{font-size:12.5px;color:#5f6774;line-height:1.5;margin-top:16px}
   code{background:#1b202a;padding:1px 5px;border-radius:2px;font-size:12.5px}
   hr{border:0;border-top:1px solid #1e2430;margin:18px 0}
-  .legend{font-size:12.5px;color:#5f6774;line-height:1.6;margin:-4px 0 14px}
+  .legend{font-size:12.5px;color:#5f6774;line-height:1.6;margin:8px 0 14px}
   .legend b{color:#8b93a0;font-weight:600}
 </style>
 <script type="importmap">
@@ -79,13 +79,14 @@
     </div>
   </div>
 
-  <label class="check"><input type="checkbox" id="flop"> Flaccid mode — rubber sabers that flop and whip</label>
+  <label class="check"><input type="checkbox" id="flop"> Flaccid mode — rubber sabers</label>
+  <label class="check"><input type="checkbox" id="metro"> Metronome — click on every detected beat</label>
 
   <p class="legend">
     <b>Easy</b> — kick and snare only, locked to the quarter note.<br>
     <b>Normal</b> — the full kit, exactly where it lands.<br>
-    <b>Hard</b> — kit plus the strongest melodic attacks (guitar, banjo, piano).<br>
-    <b>Expert</b> — everything the analysis can find.
+    <b>Hard</b> — kit plus the strongest melodic attacks.<br>
+    <b>Expert</b> — everything, with more doubles and stacks.
   </p>
 
   <div class="bar"><i id="prog"></i></div>
@@ -95,27 +96,18 @@
   <div class="row">
     <button id="btn-vr" class="primary" disabled>Play in VR</button>
     <button id="btn-preview" disabled>Preview on screen</button>
+    <button id="btn-chart" disabled>Save chart file</button>
   </div>
 
-  <p class="hint">Drop an MP3 named <code>song.mp3</code> next to this file and it loads automatically. Or add <code>?song=mytrack.mp3</code> to the URL.<br>
-  In the headset: <strong>B or Y</strong> opens the menu. Run <strong>Timing test</strong> first — it watches where you actually slice and sets the offset for you.</p>
+  <p class="hint">Drop an MP3 named <code>song.mp3</code> next to this file and it loads automatically, or add <code>?song=mytrack.mp3</code> to the URL.<br>
+  In the headset: <strong>B or Y</strong> opens the menu. If blocks feel out of step with the music, turn the metronome on — if the clicks don't match the song, the tempo detection missed and no offset will fix it.</p>
 </div></div>
 
 <script>
-/* Headset debugging aid: there's no console in the Quest browser, so surface
-   startup failures on the page itself. */
 window.__booted = false;
-function __fail(text){
-  const el = document.getElementById('status');
-  if (el){ el.className = 'warn'; el.textContent = text; }
-}
-addEventListener('error', e => {
-  __fail('Script error: ' + (e.message || (e.error && e.error.message) || 'unknown'));
-});
-setTimeout(() => {
-  if (!window.__booted)
-    __fail('The app script never started — three.js may not have loaded from the CDN.');
-}, 10000);
+function __fail(t){ const el = document.getElementById('status'); if (el){ el.className='warn'; el.textContent = t; } }
+addEventListener('error', e => __fail('Script error: ' + (e.message || (e.error && e.error.message) || 'unknown')));
+setTimeout(() => { if (!window.__booted) __fail('The app script never started — three.js may not have loaded from the CDN.'); }, 10000);
 </script>
 
 <script type="module">
@@ -159,8 +151,6 @@ const PERC_BANDS = [ [[35,110]], [[170,330],[1800,5500]], [[7000,10400]] ];
 const MEL_BAND = [[220, 4200]];
 const ANALYSIS_RATE = 22050;
 
-/* Downmix to mono at half rate before analysis. Nothing above 11 kHz
-   matters for finding drums, and this quarters the work. */
 async function toMono(buf, rate){
   const len = Math.max(1, Math.ceil(buf.duration * rate));
   const off = new OfflineAudioContext(1, len, rate);
@@ -174,9 +164,12 @@ async function toMono(buf, rate){
 async function analyze(buf, onProgress){
   const N = 1024, HOP = 256, sr = buf.sampleRate;
   const L = buf.getChannelData(0);
-  const R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
   const frames = Math.floor((buf.length - N) / HOP);
   const half = N >> 1;
+
+  /* A frame covers N samples, so a transient detected in frame f actually
+     happened around its centre, not its start. */
+  const CENTRE = (N/2) / sr;
 
   const win = new Float32Array(N);
   for (let i=0;i<N;i++) win[i] = 0.5 - 0.5*Math.cos(2*Math.PI*i/(N-1));
@@ -195,14 +188,11 @@ async function analyze(buf, onProgress){
 
   for (let f=0; f<frames; f++){
     const off = f*HOP;
-    for (let i=0;i<N;i++){
-      const s = R ? (L[off+i]+R[off+i])*0.5 : L[off+i];
-      re[i] = s*win[i]; im[i] = 0;
-    }
+    for (let i=0;i<N;i++){ re[i] = L[off+i]*win[i]; im[i] = 0; }
     fft(re, im);
     for (let k=0;k<half;k++){
       const a = re[k], b = im[k];
-      const m = Math.sqrt(a*a + b*b);   // hypot() is far slower, and we don't need its guards
+      const m = Math.sqrt(a*a + b*b);
       const e = ema[k];
       perc[k] = m > e ? m - e : 0;
       ema[k] = e*0.86 + m*0.14;
@@ -243,12 +233,13 @@ async function analyze(buf, onProgress){
   while (beat < 0.30) beat *= 2;
 
   let phase = 0, phScore = -1;
-  for (let p=0;p<96;p++){
-    const ph = p/96*beat;
+  for (let p=0;p<128;p++){
+    const ph = p/128*beat;
     let sc = 0;
     for (let t=ph; t*fps < frames; t += beat) sc += sum[Math.round(t*fps)] || 0;
     if (sc > phScore){ phScore = sc; phase = ph; }
   }
+  phase += CENTRE;
   onProgress(0.9); await yieldFrame();
 
   const W = 20, onsets = [];
@@ -265,7 +256,7 @@ async function analyze(buf, onProgress){
       let strength = Math.min(1, v/(mean*3+0.05));
       if (b === 0) strength *= 1.3;
       if (b === 1) strength *= 1.15;
-      onsets.push({ t: f*HOP/sr, band:b, strength });
+      onsets.push({ t: f*HOP/sr + CENTRE, band:b, strength });
     }
   }
   onProgress(1);
@@ -274,16 +265,18 @@ async function analyze(buf, onProgress){
 
 /* ══════════════════ difficulty → chart ══════════════════ */
 
+const LEAD_IN = 3.2;          // quiet run-up before the first block, like Beat Saber
+
 const DIFFS = [
-  { name:'Easy',   bands:[0,1],     div:1, forceGrid:true,  gap:0,    melKeep:0   },
-  { name:'Normal', bands:[0,1,2],   div:4, forceGrid:false, gap:0.26, melKeep:0   },
-  { name:'Hard',   bands:[0,1,2,3], div:4, forceGrid:false, gap:0.20, melKeep:0.35},
-  { name:'Expert', bands:[0,1,2,3], div:8, forceGrid:false, gap:0.13, melKeep:1   },
+  { name:'Easy',   bands:[0,1],     div:1, forceGrid:true,  gap:0,    melKeep:0,    pair:0.00 },
+  { name:'Normal', bands:[0,1,2],   div:4, forceGrid:false, gap:0.26, melKeep:0,    pair:0.10 },
+  { name:'Hard',   bands:[0,1,2,3], div:4, forceGrid:false, gap:0.20, melKeep:0.35, pair:0.18 },
+  { name:'Expert', bands:[0,1,2,3], div:8, forceGrid:false, gap:0.13, melKeep:1,    pair:0.26 },
 ];
-const DIRS = { up:[0,1], down:[0,-1], left:[-1,0], right:[1,0],
-  upL:[-0.7071,0.7071], upR:[0.7071,0.7071], dnL:[-0.7071,-0.7071], dnR:[0.7071,-0.7071] };
-const DIR_ANGLE = { up:0, upR:-Math.PI/4, right:-Math.PI/2, dnR:-3*Math.PI/4,
-  down:Math.PI, dnL:3*Math.PI/4, left:Math.PI/2, upL:Math.PI/4 };
+
+/* no diagonals */
+const DIRS = { up:[0,1], down:[0,-1], left:[-1,0], right:[1,0] };
+const DIR_ANGLE = { up:0, right:-Math.PI/2, down:Math.PI, left:Math.PI/2 };
 
 function buildChart(a, dIdx){
   const D = DIFFS[dIdx];
@@ -320,7 +313,7 @@ function buildChart(a, dIdx){
   const byStrength = pool.slice().sort((x,y) => y.strength - x.strength);
   const kept = [];
   for (const o of byStrength){
-    if (o.t < 1.8) continue;
+    if (o.t < LEAD_IN) continue;
     let clear = true;
     for (const k of kept) if (Math.abs(k.t - o.t) < minGap){ clear = false; break; }
     if (clear) kept.push(o);
@@ -329,11 +322,31 @@ function buildChart(a, dIdx){
 
   const ROW_OF = [0,1,2,1];
   const notes = [];
-  let hand = 0, lastCol = [1,2];
+  let hand = 0, lastCol = [1,2], lastPair = -9;
+
   for (const o of kept){
     const row = ROW_OF[o.band];
     hand ^= 1;
     const h = hand;
+
+    /* doubles: a two-hand pair side by side, or a stack one hand cuts through */
+    const canPair = o.strength > 0.62 && o.t - lastPair > beat*1.5 && Math.random() < D.pair;
+    if (canPair){
+      lastPair = o.t;
+      if (Math.random() < 0.55){
+        const dir = row === 2 ? 'down' : 'up';
+        notes.push({ t:o.t, col:1, row, hand:0, dir, band:o.band, hit:false, spawned:false });
+        notes.push({ t:o.t, col:2, row, hand:1, dir, band:o.band, hit:false, spawned:false });
+      } else {
+        const r = row === 2 ? 1 : row;
+        const dir = Math.random() < 0.5 ? 'up' : 'down';
+        const col = h ? 2 : 1;
+        notes.push({ t:o.t, col, row:r,   hand:h, dir, band:o.band, hit:false, spawned:false });
+        notes.push({ t:o.t, col, row:r+1, hand:h, dir, band:o.band, hit:false, spawned:false });
+      }
+      continue;
+    }
+
     let col;
     if (o.band === 3) col = h ? 3 : 0;
     else {
@@ -343,13 +356,14 @@ function buildChart(a, dIdx){
       col = Math.max(0, Math.min(3, col));
     }
     lastCol[h] = col;
+
     let dir;
-    if (o.band === 0) dir = Math.random() < 0.8 ? 'up' : (h?'upR':'upL');
-    else if (o.band === 2) dir = Math.random() < 0.7 ? 'down' : (h?'dnR':'dnL');
-    else if (o.band === 3) dir = h ? 'dnR' : 'dnL';
+    if (o.band === 0) dir = 'up';
+    else if (o.band === 2) dir = 'down';
     else dir = h ? 'left' : 'right';
     notes.push({ t:o.t, col, row, hand:h, dir, band:o.band, hit:false, spawned:false });
   }
+  notes.sort((x,y) => x.t - y.t);
   return notes;
 }
 
@@ -362,12 +376,19 @@ const LENS = [
   { name:'Forgiving',     box:1.00, spd:1.0, align:0.15, late:2.7 },
   { name:'Any direction', box:1.20, spd:0.7, align:-2,   late:3.3 },
 ];
+const TIERS = [
+  { at:0,  mult:1, name:'' },
+  { at:5,  mult:2, name:'2×' },
+  { at:15, mult:4, name:'4×' },
+  { at:30, mult:8, name:'8×' },
+];
 
 let diffIdx  = Number(localStorage.getItem('cutline.diff')  ?? 1);
 let speedIdx = Number(localStorage.getItem('cutline.speed') ?? 1);
 let lenIdx   = Number(localStorage.getItem('cutline.len')   ?? 2);
 let syncOffsetMs = Number(localStorage.getItem('cutline.offset') || 0);
 let flaccid  = localStorage.getItem('cutline.flop') === '1';
+let metro    = localStorage.getItem('cutline.metro') === '1';
 
 const LEN = () => LENS[lenIdx];
 const speed = () => SPEEDS[speedIdx].v;
@@ -377,15 +398,22 @@ function save(){
   localStorage.setItem('cutline.len', String(lenIdx));
   localStorage.setItem('cutline.offset', String(syncOffsetMs));
   localStorage.setItem('cutline.flop', flaccid ? '1' : '0');
+  localStorage.setItem('cutline.metro', metro ? '1' : '0');
+}
+
+function tierOf(c){
+  let t = 0;
+  for (let i=TIERS.length-1;i>=0;i--) if (c >= TIERS[i].at){ t = i; break; }
+  return t;
 }
 
 /* ══════════════════ scene ══════════════════ */
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05060a);
-scene.fog = new THREE.Fog(0x05060a, 10, 21);
+scene.fog = new THREE.Fog(0x05060a, 10, 22);
 
-const camera = new THREE.PerspectiveCamera(68, innerWidth/innerHeight, 0.01, 60);
+const camera = new THREE.PerspectiveCamera(68, innerWidth/innerHeight, 0.01, 70);
 camera.position.set(0, 1.5, 0.9);
 
 const renderer = new THREE.WebGLRenderer({ antialias:true });
@@ -398,7 +426,7 @@ renderer.toneMappingExposure = 1.25;
 document.body.appendChild(renderer.domElement);
 
 scene.add(new THREE.HemisphereLight(0x3a5a8f, 0x0a0812, 0.85));
-const key = new THREE.DirectionalLight(0xbfd8ff, 0.9); key.position.set(1,3,2); scene.add(key);
+const keyLight = new THREE.DirectionalLight(0xbfd8ff, 0.9); keyLight.position.set(1,3,2); scene.add(keyLight);
 
 const RED = 0xff2d6b, BLUE = 0x15d6ff;
 const HIT_PLANE = -0.35;
@@ -427,6 +455,85 @@ const hitMark = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.012, 0.03),
     blending:THREE.AdditiveBlending, depthWrite:false }));
 hitMark.position.set(0, 0.03, HIT_PLANE);
 scene.add(hitMark);
+
+/* ── reward layers, unlocked by streak tier ── */
+
+const stars = (() => {
+  const n = 600, pos = new Float32Array(n*3);
+  for (let i=0;i<n;i++){
+    pos[i*3]   = (Math.random()-0.5)*26;
+    pos[i*3+1] = Math.random()*11 - 1;
+    pos[i*3+2] = -Math.random()*34;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  const m = new THREE.PointsMaterial({ color:0x9fd8ff, size:0.055, transparent:true,
+    opacity:0, blending:THREE.AdditiveBlending, depthWrite:false });
+  const p = new THREE.Points(g, m);
+  p.visible = false; scene.add(p);
+  return p;
+})();
+
+const pillars = [];
+for (let i=0;i<12;i++){
+  const side = i % 2 ? 1 : -1;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.07, 3.4, 0.07),
+    new THREE.MeshBasicMaterial({ color:0x15d6ff, transparent:true, opacity:0,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+  m.position.set(side*1.75, 1.7, -2 - Math.floor(i/2)*4);
+  m.visible = false;
+  scene.add(m);
+  pillars.push(m);
+}
+
+const rings = [];
+for (let i=0;i<7;i++){
+  const m = new THREE.Mesh(new THREE.TorusGeometry(2.3, 0.022, 6, 28),
+    new THREE.MeshBasicMaterial({ color:0xff2d6b, transparent:true, opacity:0,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+  m.position.set(0, 1.5, -4 - i*4.5);
+  m.visible = false;
+  scene.add(m);
+  rings.push(m);
+}
+
+let tierShown = 0, tierGlow = 0;
+
+function setTier(t){
+  tierShown = t;
+  stars.visible = t >= 1;
+  for (const p of pillars) p.visible = t >= 2;
+  for (const r of rings) r.visible = t >= 3;
+}
+
+function stepRewards(dt, beatPulse){
+  const target = tierShown;
+  tierGlow += (target - tierGlow) * Math.min(1, dt*4);
+
+  if (stars.visible){
+    stars.material.opacity = Math.min(1, tierGlow) * 0.75;
+    stars.rotation.z += dt*0.012;
+  }
+  if (pillars[0].visible){
+    const k = THREE.MathUtils.clamp(tierGlow-1, 0, 1);
+    for (let i=0;i<pillars.length;i++){
+      const p = pillars[i];
+      p.material.opacity = k * (0.18 + beatPulse*0.5);
+      p.position.z += dt * 7;
+      if (p.position.z > 2) p.position.z -= 26;
+    }
+  }
+  if (rings[0].visible){
+    const k = THREE.MathUtils.clamp(tierGlow-2, 0, 1);
+    for (const r of rings){
+      r.material.opacity = k * (0.25 + beatPulse*0.55);
+      r.position.z += dt * 9;
+      r.rotation.z += dt * 0.5;
+      if (r.position.z > 2) r.position.z -= 31.5;
+    }
+  }
+  grid.material.opacity = 0.5 + Math.min(tierGlow,3)*0.09;
+}
 
 const COL_X = c => (c-1.5)*0.45;
 const ROW_Y = r => 0.88 + r*0.42;
@@ -470,7 +577,7 @@ function dotTexture(){
 }
 const arrowTex = arrowTexture(), dotTex = dotTexture();
 
-const POOL = 48, blocks = [];
+const POOL = 54, blocks = [];
 const arrowGeo = new THREE.PlaneGeometry(BLOCK*0.6, BLOCK*0.6);
 for (let i=0;i<POOL;i++){
   const g = new THREE.Group();
@@ -491,7 +598,7 @@ for (let i=0;i<POOL;i++){
 }
 
 /* ── debris ── */
-const SHARDS = 220, shards = [];
+const SHARDS = 240, shards = [];
 const shardGeo = new THREE.BoxGeometry(1,1,1);
 for (let i=0;i<SHARDS;i++){
   const m = new THREE.Mesh(shardGeo, new THREE.MeshBasicMaterial({
@@ -500,7 +607,7 @@ for (let i=0;i<SHARDS;i++){
   shards.push({ m, vel:new THREE.Vector3(), spin:new THREE.Vector3(), life:0, max:1 });
 }
 let shardCursor = 0;
-const FLASHES = 10, flashes = [];
+const FLASHES = 12, flashes = [];
 const flashGeo = new THREE.PlaneGeometry(1,1);
 for (let i=0;i<FLASHES;i++){
   const m = new THREE.Mesh(flashGeo, new THREE.MeshBasicMaterial({
@@ -560,14 +667,18 @@ function stepDebris(dt){
   }
 }
 
-/* ══════════════════ sabers — rigid or rubber ══════════════════ */
+/* ══════════════════ sabers ══════════════════ */
 
 const BLADE = 0.95;
-const NODES = 9;                     // blade is a chain; node 0 sits at the hilt
+const NODES = 9;
 const SEG = BLADE/(NODES-1);
-const STIFF = 0.42;                  // how eagerly the blade straightens
-const FLOP_G = 4.5;                  // droop
+const FIXED = 1/120;            // physics substep — frame-rate independent
+const STIFF = 0.55;
+const FLOP_G = 4.0;
+const CHAIN_DAMP = 0.86;
+const DISP_SMOOTH = 14;         // render/collision smoothing rate
 const Y_AXIS = new THREE.Vector3(0,1,0);
+const BOLT_ARCS = 3, BOLT_SEGS = 5;
 const sabers = [];
 
 for (let i=0;i<2;i++){
@@ -586,7 +697,6 @@ for (let i=0;i<2;i++){
   ray.rotation.x = -Math.PI/2; ray.position.z = -1.5; ray.visible = false;
   c.add(ray);
 
-  /* blade drawn as world-space segments so it can bend */
   const segs = [], glows = [];
   for (let j=0;j<NODES-1;j++){
     const core = new THREE.Mesh(new THREE.CylinderGeometry(0.0115,0.0115,1,8),
@@ -599,13 +709,24 @@ for (let i=0;i<2;i++){
     segs.push(core); glows.push(gl);
   }
 
-  const s = { ctrl:c, hand:i, src:null, ray, segs, glows, color,
-              nodes:[], prevNodes:[], vel:[], inited:false,
+  /* lightning that arcs along the blade once a streak tier is earned */
+  const boltGeo = new THREE.BufferGeometry();
+  boltGeo.setAttribute('position',
+    new THREE.BufferAttribute(new Float32Array(BOLT_ARCS*BOLT_SEGS*2*3), 3));
+  const bolts = new THREE.LineSegments(boltGeo, new THREE.LineBasicMaterial({
+    color:0xffffff, transparent:true, opacity:0.85,
+    blending:THREE.AdditiveBlending, depthWrite:false }));
+  bolts.frustumCulled = false; bolts.visible = false;
+  scene.add(bolts);
+
+  const s = { ctrl:c, hand:i, src:null, ray, segs, glows, color, bolts,
+              nodes:[], vel:[], disp:[], prevDisp:[], acc:0, inited:false,
               swing:new THREE.Vector3(), wasTrig:false, wasMenu:false };
   for (let k=0;k<NODES;k++){
     s.nodes.push(new THREE.Vector3());
-    s.prevNodes.push(new THREE.Vector3());
     s.vel.push(new THREE.Vector3());
+    s.disp.push(new THREE.Vector3());
+    s.prevDisp.push(new THREE.Vector3());
   }
   c.addEventListener('connected', e => { s.src = e.data; s.inited = false; });
   c.addEventListener('disconnected', () => { s.src = null; s.inited = false; });
@@ -615,52 +736,65 @@ for (let i=0;i<2;i++){
 const _base = new THREE.Vector3(), _fwd = new THREE.Vector3();
 const _ideal = new THREE.Vector3(), _dirv = new THREE.Vector3();
 const _mid = new THREE.Vector3(), _q = new THREE.Quaternion();
+const _perp = new THREE.Vector3(), _perp2 = new THREE.Vector3();
+
+function chainStep(s, h){
+  for (let i=1;i<NODES;i++){
+    s.vel[i].y -= FLOP_G*h;
+    s.vel[i].multiplyScalar(CHAIN_DAMP);
+    s.nodes[i].addScaledVector(s.vel[i], h);
+  }
+  for (let iter=0; iter<3; iter++){
+    for (let i=1;i<NODES;i++){
+      if (i === 1) _ideal.copy(s.nodes[0]).addScaledVector(_fwd, SEG);
+      else {
+        _dirv.copy(s.nodes[i-1]).sub(s.nodes[i-2]);
+        if (_dirv.lengthSq() < 1e-9) _dirv.copy(_fwd);
+        _dirv.normalize();
+        _ideal.copy(s.nodes[i-1]).addScaledVector(_dirv, SEG);
+      }
+      s.nodes[i].lerp(_ideal, STIFF);
+      _dirv.copy(s.nodes[i]).sub(s.nodes[i-1]);
+      const len = _dirv.length();
+      if (len > 1e-6) s.nodes[i].copy(s.nodes[i-1]).addScaledVector(_dirv.divideScalar(len), SEG);
+    }
+  }
+  /* velocity follows the correction, but gently — this is what killed the jitter */
+  for (let i=1;i<NODES;i++){
+    _dirv.copy(s.nodes[i]).sub(s.disp[i]).divideScalar(h);
+    s.vel[i].lerp(_dirv, 0.25);
+    const L = s.vel[i].length();
+    if (L > 18) s.vel[i].multiplyScalar(18/L);
+  }
+}
 
 function updateSaber(s, dt){
   const m = s.ctrl.matrixWorld;
   _base.set(0,0,-0.06).applyMatrix4(m);
   _fwd.set(0,0,-1).transformDirection(m).normalize();
 
-  for (let i=0;i<NODES;i++) s.prevNodes[i].copy(s.nodes[i]);
+  for (let i=0;i<NODES;i++) s.prevDisp[i].copy(s.disp[i]);
 
   if (!s.inited || !flaccid){
     for (let i=0;i<NODES;i++) s.nodes[i].copy(_base).addScaledVector(_fwd, SEG*i);
     if (!s.inited){
-      for (let i=0;i<NODES;i++){ s.prevNodes[i].copy(s.nodes[i]); s.vel[i].set(0,0,0); }
-      s.inited = true;
+      for (let i=0;i<NODES;i++){
+        s.disp[i].copy(s.nodes[i]); s.prevDisp[i].copy(s.nodes[i]); s.vel[i].set(0,0,0);
+      }
+      s.acc = 0; s.inited = true;
     }
   } else {
     s.nodes[0].copy(_base);
-    for (let i=1;i<NODES;i++){
-      s.vel[i].y -= FLOP_G*dt;
-      s.nodes[i].addScaledVector(s.vel[i], dt);
-    }
-    for (let iter=0; iter<2; iter++){
-      for (let i=1;i<NODES;i++){
-        if (i === 1) _ideal.copy(s.nodes[0]).addScaledVector(_fwd, SEG);
-        else {
-          _dirv.copy(s.nodes[i-1]).sub(s.nodes[i-2]);
-          if (_dirv.lengthSq() < 1e-9) _dirv.copy(_fwd);
-          _dirv.normalize();
-          _ideal.copy(s.nodes[i-1]).addScaledVector(_dirv, SEG);
-        }
-        s.nodes[i].lerp(_ideal, STIFF);
-        _dirv.copy(s.nodes[i]).sub(s.nodes[i-1]);
-        const len = _dirv.length();
-        if (len > 1e-6) s.nodes[i].copy(s.nodes[i-1]).addScaledVector(_dirv.divideScalar(len), SEG);
-      }
-    }
-    const damp = Math.pow(0.02, dt);
-    for (let i=1;i<NODES;i++){
-      s.vel[i].copy(s.nodes[i]).sub(s.prevNodes[i]).divideScalar(Math.max(dt,1e-4)).multiplyScalar(damp);
-      const L = s.vel[i].length();
-      if (L > 26) s.vel[i].multiplyScalar(26/L);
-    }
+    s.acc = Math.min(s.acc + dt, 0.1);
+    while (s.acc >= FIXED){ chainStep(s, FIXED); s.acc -= FIXED; }
   }
 
-  /* draw */
+  /* smooth what gets drawn and what the collision test sees */
+  const k = flaccid ? Math.min(1, dt*DISP_SMOOTH) : 1;
+  for (let i=0;i<NODES;i++) s.disp[i].lerp(s.nodes[i], k);
+
   for (let j=0;j<NODES-1;j++){
-    const a = s.nodes[j], b = s.nodes[j+1];
+    const a = s.disp[j], b = s.disp[j+1];
     _mid.copy(a).add(b).multiplyScalar(0.5);
     _dirv.copy(b).sub(a);
     const len = _dirv.length() || 1e-5;
@@ -673,23 +807,53 @@ function updateSaber(s, dt){
       mesh.visible = true;
     }
   }
+  s.glows.forEach(g => { g.material.opacity = 0.36 + Math.min(tierGlow,3)*0.07; });
+  updateBolts(s);
+}
+
+function updateBolts(s){
+  const tier = tierShown;
+  if (tier < 1){ s.bolts.visible = false; return; }
+  s.bolts.visible = true;
+  s.bolts.material.opacity = 0.35 + tier*0.2;
+  s.bolts.material.color.setHex(tier >= 3 ? 0xffffff : s.color);
+
+  const pos = s.bolts.geometry.attributes.position.array;
+  const spread = 0.022 + tier*0.016;
+  const arcs = Math.min(BOLT_ARCS, tier);
+  let p = 0;
+  for (let a=0; a<arcs; a++){
+    const start = 1 + Math.floor(Math.random()*(NODES-1-BOLT_SEGS));
+    _perp.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
+    for (let k=0;k<BOLT_SEGS;k++){
+      const n0 = s.disp[Math.min(NODES-1, start+k)];
+      const n1 = s.disp[Math.min(NODES-1, start+k+1)];
+      _perp2.copy(_perp).multiplyScalar(spread*(Math.random()-0.5)*2);
+      pos[p++] = n0.x + _perp2.x; pos[p++] = n0.y + _perp2.y; pos[p++] = n0.z + _perp2.z;
+      _perp2.copy(_perp).multiplyScalar(spread*(Math.random()-0.5)*2);
+      pos[p++] = n1.x + _perp2.x; pos[p++] = n1.y + _perp2.y; pos[p++] = n1.z + _perp2.z;
+    }
+  }
+  while (p < pos.length) pos[p++] = 0;
+  s.bolts.geometry.attributes.position.needsUpdate = true;
 }
 
 function hideSaber(s){
   for (let j=0;j<NODES-1;j++){ s.segs[j].visible = false; s.glows[j].visible = false; }
+  s.bolts.visible = false;
 }
-
 function buzz(s, i, ms){
   const a = s?.src?.gamepad?.hapticActuators?.[0];
   if (a?.pulse){ try { a.pulse(i, ms); } catch(e){} }
 }
 
-/* UI + run state. These must be declared before anything that reads them —
-   drawHud() runs during startup and checks `test`. */
+/* ══════════════════ run state ══════════════════ */
+
 let menuOpen = false, hoverIdx = -1, hoverSide = 0, songStarted = false;
 let menuMode = 'main', test = null, testResult = null;
+let score = 0, combo = 0, best = 0, hits = 0, misses = 0;
 
-/* ── HUD ── */
+/* ── HUD (centre) ── */
 const hudCanvas = document.createElement('canvas');
 hudCanvas.width = 512; hudCanvas.height = 170;
 const hudCtx = hudCanvas.getContext('2d');
@@ -699,8 +863,6 @@ const hud = new THREE.Mesh(new THREE.PlaneGeometry(1.1,0.365),
   new THREE.MeshBasicMaterial({ map:hudTex, transparent:true }));
 hud.position.set(0, 2.25, -3.2);
 scene.add(hud);
-
-let score = 0, combo = 0, best = 0, hits = 0, misses = 0;
 
 function drawHud(msg){
   const g = hudCtx;
@@ -725,37 +887,126 @@ function drawHud(msg){
   g.shadowColor='#15d6ff'; g.shadowBlur=18; g.fillStyle='#eef2f7';
   g.font = '600 64px Inter, Helvetica, Arial';
   g.fillText(score.toLocaleString(), 256, 66);
-  g.shadowBlur = 10;
-  g.font = '500 30px Inter, Helvetica, Arial';
-  g.fillStyle = combo > 0 ? '#ffc24a' : '#5f6774';
-  g.fillText(combo > 0 ? combo+'x combo' : (msg || '—'), 256, 114);
   g.shadowBlur = 0;
+  g.font = '500 28px Inter, Helvetica, Arial';
+  g.fillStyle = '#5f6774';
+  g.fillText(msg || (hits + ' hit · ' + misses + ' missed'), 256, 112);
   g.font = '400 22px Inter, Helvetica, Arial';
   g.fillStyle = '#6f7a88';
-  g.fillText(hits + ' hit · ' + misses + ' missed', 256, 152);
+  g.fillText(hits + ' hit · ' + misses + ' missed', 256, 150);
   hudTex.needsUpdate = true;
 }
+
+/* ── streak panel (right) ── */
+const stkCanvas = document.createElement('canvas');
+stkCanvas.width = 360; stkCanvas.height = 460;
+const sg = stkCanvas.getContext('2d');
+const stkTex = new THREE.CanvasTexture(stkCanvas);
+stkTex.colorSpace = THREE.SRGBColorSpace;
+const streakPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.58, 0.742),
+  new THREE.MeshBasicMaterial({ map:stkTex, transparent:true }));
+streakPanel.position.set(1.62, 1.62, -2.5);
+streakPanel.rotation.y = -0.55;
+scene.add(streakPanel);
+
+const TIER_COL = ['#5f6774', '#15d6ff', '#ffc24a', '#ff2d6b'];
+
+function drawStreak(){
+  const t = tierOf(combo);
+  const col = TIER_COL[t];
+  sg.clearRect(0,0,360,460);
+
+  sg.fillStyle = 'rgba(10,13,20,0.80)';
+  sg.fillRect(0,0,360,460);
+  sg.strokeStyle = col; sg.lineWidth = 3;
+  sg.shadowColor = col; sg.shadowBlur = t ? 24 : 6;
+  sg.strokeRect(2,2,356,456);
+  sg.shadowBlur = 0;
+
+  sg.textAlign = 'center';
+  sg.font = '600 22px Inter, Helvetica, Arial';
+  sg.fillStyle = '#5f6774';
+  sg.fillText('S T R E A K', 180, 52);
+
+  sg.shadowColor = col; sg.shadowBlur = t ? 26 : 0;
+  sg.fillStyle = '#eef2f7';
+  sg.font = '600 116px Inter, Helvetica, Arial';
+  sg.fillText(String(combo), 180, 162);
+  sg.shadowBlur = 0;
+
+  sg.font = '600 68px Inter, Helvetica, Arial';
+  sg.fillStyle = col;
+  sg.shadowColor = col; sg.shadowBlur = t ? 22 : 0;
+  sg.fillText(TIERS[t].mult + '×', 180, 248);
+  sg.shadowBlur = 0;
+
+  /* ladder */
+  for (let i=1;i<TIERS.length;i++){
+    const y = 300 + (i-1)*48;
+    const on = t >= i;
+    sg.fillStyle = on ? TIER_COL[i] : '#242a34';
+    sg.fillRect(40, y, 280, 6);
+    if (!on && t === i-1){
+      const prev = TIERS[i-1].at, span = TIERS[i].at - prev;
+      const k = THREE.MathUtils.clamp((combo - prev)/span, 0, 1);
+      sg.fillStyle = TIER_COL[i];
+      sg.globalAlpha = 0.5;
+      sg.fillRect(40, y, 280*k, 6);
+      sg.globalAlpha = 1;
+    }
+    sg.textAlign = 'left';
+    sg.font = '500 19px Inter, Helvetica, Arial';
+    sg.fillStyle = on ? TIER_COL[i] : '#3b434f';
+    sg.fillText(TIERS[i].mult + '×  at  ' + TIERS[i].at, 40, y - 10);
+    sg.textAlign = 'center';
+  }
+  stkTex.needsUpdate = true;
+}
 drawHud('ready');
+drawStreak();
+
+/* tier change effects */
+let lastTier = 0;
+function checkTier(s){
+  const t = tierOf(combo);
+  if (t === lastTier) return;
+  const up = t > lastTier;
+  lastTier = t;
+  setTier(t);
+  if (up){
+    for (const q of sabers) buzz(q, 0.8, 90);
+    drawHud(TIERS[t].mult + '× multiplier');
+  }
+}
 
 /* ══════════════════ menu ══════════════════ */
 
-const MW = 1024, MH = 900;
+const MW = 1024, MH = 960;
 const menuCanvas = document.createElement('canvas');
 menuCanvas.width = MW; menuCanvas.height = MH;
 const mg = menuCanvas.getContext('2d');
 const menuTex = new THREE.CanvasTexture(menuCanvas);
 menuTex.colorSpace = THREE.SRGBColorSpace;
-const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.011),
+const menuMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 1.078),
   new THREE.MeshBasicMaterial({ map:menuTex, transparent:true }));
 menuMesh.visible = false;
 scene.add(menuMesh);
 
 const ROW_H = 76, ROW_TOP = 192;
+/* coarse and fine nudge zones for the block-lead row */
+const LEAD_MAX = 2000;
+const NUDGES = [
+  { label:'−−', d:-100, x:MW-500 },
+  { label:'−',  d:-10,  x:MW-430 },
+  { label:'+',  d:+10,  x:MW-360 },
+  { label:'++', d:+100, x:MW-290 },
+];
 const MAIN = [
   { id:'resume',  label:() => songStarted ? 'Resume' : 'Start' },
   { id:'restart', label:() => 'Restart song' },
   { id:'test',    label:() => 'Timing test' },
-  { id:'offset',  label:() => 'Offset', value:() => (syncOffsetMs>0?'+':'')+syncOffsetMs+' ms', split:true },
+  { id:'offset',  label:() => 'Block lead', value:() => (syncOffsetMs>0?'+':'')+syncOffsetMs+' ms', split:true },
+  { id:'metro',   label:() => 'Metronome', value:() => metro ? 'ON' : 'off' },
   { id:'len',     label:() => 'Hit window', value:() => LENS[lenIdx].name },
   { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
   { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
@@ -763,7 +1014,6 @@ const MAIN = [
   { id:'exit',    label:() => 'Exit to desktop' },
 ];
 let RESULT = [];
-
 const items = () => menuMode === 'result' ? RESULT : MAIN;
 
 function drawMenu(){
@@ -786,9 +1036,9 @@ function drawMenu(){
   mg.fillStyle = '#8b93a0';
   if (menuMode === 'result' && testResult){
     const m = Math.round(testResult.median*1000);
-    mg.fillText(`You sliced ${Math.abs(m)} ms ${m>0?'late':'early'} on average, over ${testResult.n} hits.`, MW/2, 128);
+    mg.fillText(`You sliced ${Math.abs(m)} ms ${m>0?'late':'early'} over ${testResult.n} hits.`, MW/2, 128);
   } else {
-    mg.fillText(score > 0 ? (score.toLocaleString()+' · '+hits+'/'+(hits+misses)+' · best '+best+'x')
+    mg.fillText(score > 0 ? (score.toLocaleString()+' · '+hits+'/'+(hits+misses)+' · best streak '+best)
                           : 'Point and pull the trigger', MW/2, 128);
   }
 
@@ -806,16 +1056,18 @@ function drawMenu(){
     mg.fillStyle = it.id === 'exit' ? '#ff6b8a' : (on ? '#ffffff' : '#c9d2de');
     mg.fillText(it.label(), 82, y);
     if (it.value){
+      const v = it.value();
       mg.textAlign = 'right';
-      mg.fillStyle = (it.id === 'flop' && !flaccid) ? '#4d5664' : '#ffc24a';
+      mg.fillStyle = (v === 'off') ? '#4d5664' : '#ffc24a';
       mg.font = '600 34px Inter, Helvetica, Arial';
-      mg.fillText(it.value(), MW-82, y);
+      mg.fillText(v, MW-82, y);
       if (it.split){
         mg.textAlign = 'center';
-        mg.fillStyle = on && hoverSide < 0 ? '#ffffff' : '#4d5664';
-        mg.fillText('−', MW-330, y);
-        mg.fillStyle = on && hoverSide > 0 ? '#ffffff' : '#4d5664';
-        mg.fillText('+', MW-250, y);
+        mg.font = '600 30px Inter, Helvetica, Arial';
+        NUDGES.forEach(nz => {
+          mg.fillStyle = on && hoverSide === nz.d ? '#ffffff' : '#4d5664';
+          mg.fillText(nz.label, nz.x, y);
+        });
       }
     }
   });
@@ -830,8 +1082,8 @@ function openMenu(mode){
   const p = new THREE.Vector3(), q = new THREE.Quaternion();
   head.getWorldPosition(p); head.getWorldQuaternion(q);
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(q);
-  menuMesh.position.copy(p).addScaledVector(fwd, 1.55);
-  menuMesh.position.y = Math.max(1.0, p.y - 0.1);
+  menuMesh.position.copy(p).addScaledVector(fwd, 1.6);
+  menuMesh.position.y = Math.max(1.0, p.y - 0.08);
   menuMesh.lookAt(p);
   menuMesh.visible = true;
   for (const s of sabers) s.ray.visible = true;
@@ -856,10 +1108,9 @@ function menuPick(s){
   if (idx < 0 || idx >= items().length) return null;
   if (cx < 48 || cx > MW-48) return null;
   let side = 0;
-  if (items()[idx].split){
-    if (cx > MW-370 && cx < MW-290) side = -1;
-    else if (cx > MW-290 && cx < MW-210) side = 1;
-  }
+  if (items()[idx].split)
+    for (const nz of NUDGES)
+      if (cx > nz.x - 35 && cx < nz.x + 35){ side = nz.d; break; }
   return { idx, side, dist: hit.distance };
 }
 
@@ -869,14 +1120,15 @@ function activate(id, side, s){
     case 'restart': startSong(); closeMenu(); break;
     case 'test': startTimingTest(); break;
     case 'offset':
-      syncOffsetMs = Math.max(-300, Math.min(300, syncOffsetMs + (side>=0?5:-5))); break;
+      syncOffsetMs = Math.max(-LEAD_MAX, Math.min(LEAD_MAX, syncOffsetMs + (side || 10))); break;
+    case 'metro': metro = !metro; break;
     case 'len':   lenIdx = (lenIdx+1)%LENS.length; break;
     case 'diff':  diffIdx = (diffIdx+1)%DIFFS.length; rechartLive(); break;
     case 'speed': speedIdx = (speedIdx+1)%SPEEDS.length; break;
     case 'flop':  flaccid = !flaccid; for (const q of sabers) q.inited = false; break;
     case 'exit':  renderer.xr.getSession()?.end(); break;
     case 'apply':
-      syncOffsetMs = Math.round(Math.max(-300, Math.min(300, syncOffsetMs - testResult.median*1000)));
+      syncOffsetMs = Math.round(Math.max(-LEAD_MAX, Math.min(LEAD_MAX, syncOffsetMs - testResult.median*1000)));
       testResult = null; openMenu('main'); break;
     case 'again': startTimingTest(); break;
     case 'back':  testResult = null; openMenu('main'); break;
@@ -886,16 +1138,18 @@ function activate(id, side, s){
   drawMenu();
 }
 
-/* ── timing test ── */
-function click(at){
+/* ── click sound, used by the metronome and the timing test ── */
+function click(at, hi){
   const o = ac.createOscillator(), g = ac.createGain();
-  o.type = 'square'; o.frequency.setValueAtTime(1500, at);
+  o.type = 'square'; o.frequency.setValueAtTime(hi ? 1500 : 1050, at);
   g.gain.setValueAtTime(0.0001, at);
-  g.gain.exponentialRampToValueAtTime(0.42, at+0.002);
-  g.gain.exponentialRampToValueAtTime(0.0001, at+0.07);
+  g.gain.exponentialRampToValueAtTime(hi ? 0.42 : 0.2, at+0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001, at+0.06);
   o.connect(g).connect(ac.destination);
-  o.start(at); o.stop(at+0.12);
+  o.start(at); o.stop(at+0.1);
 }
+
+/* ── timing test ── */
 const testTime = () => ac.currentTime + syncOffsetMs/1000;
 
 function startTimingTest(){
@@ -908,7 +1162,7 @@ function startTimingTest(){
   for (let i=0;i<n;i++){
     const T = t0 + i*period;
     test.times.push(T);
-    click(T - syncOffsetMs/1000);
+    click(T - syncOffsetMs/1000, true);
   }
   drawHud();
 }
@@ -963,14 +1217,17 @@ function tickTest(dt){
 /* ══════════════════ gameplay ══════════════════ */
 
 let notes = [], nextNote = 0, playing = false, startedAt = 0, source = null;
-let autoPlay = false, pausedAt = 0;
+let autoPlay = false, pausedAt = 0, finishing = false, metroNext = 0;
+
 const songTime = () => ac ? (ac.currentTime - startedAt) + syncOffsetMs/1000 : 0;
 
 function resetRun(){
   for (const b of blocks){ b.grp.visible = false; b.note = null; }
   for (const n of notes){ n.hit = false; n.spawned = false; }
   nextNote = 0; score = 0; combo = 0; best = 0; hits = 0; misses = 0;
-  drawHud('go');
+  lastTier = 0; setTier(0); tierGlow = 0;
+  finishing = false; metroNext = 0;
+  drawHud('go'); drawStreak();
 }
 function makeSource(offsetSec){
   source = ac.createBufferSource();
@@ -980,18 +1237,20 @@ function makeSource(offsetSec){
   const at = ac.currentTime + 0.12;
   source.start(at, Math.max(0, offsetSec));
   startedAt = at - offsetSec;
-  source.onended = () => {
-    if (!playing) return;
-    playing = false; songStarted = false;
-    drawHud('done — ' + hits + '/' + (hits+misses));
-    if (renderer.xr.isPresenting) openMenu('main');
-  };
+  /* don't end the run here — blocks are still in flight */
+  source.onended = () => { if (playing) finishing = true; };
   playing = true;
 }
 function killSource(){ if (source){ try { source.onended=null; source.stop(); } catch(e){} source=null; } }
 function startSong(){ killSource(); resetRun(); songStarted = true; makeSource(0); }
 function pauseSong(){ pausedAt = songTime(); killSource(); playing = false; }
-function resumeSong(){ if (!songStarted) return startSong(); makeSource(pausedAt); }
+function resumeSong(){ if (!songStarted) return startSong(); metroNext = 0; makeSource(pausedAt); }
+
+function endRun(){
+  playing = false; finishing = false; songStarted = false;
+  drawHud('done — ' + hits + '/' + (hits+misses));
+  if (renderer.xr.isPresenting) openMenu('main');
+}
 
 const _a = new THREE.Vector3(), _dd = new THREE.Vector3(), _wdir = new THREE.Vector3();
 
@@ -1022,25 +1281,23 @@ function registerHit(b, quality, s, dirVec, power){
   }
   b.note.hit = true; combo++; hits++;
   if (combo > best) best = combo;
-  const mult = combo >= 24 ? 8 : combo >= 12 ? 4 : combo >= 5 ? 2 : 1;
-  score += Math.round((70 + 40*quality)*mult);
+  score += Math.round((70 + 40*quality) * TIERS[tierOf(combo)].mult);
   burst(b.grp.position, b.note.hand ? BLUE : RED, dirVec, power);
   b.grp.visible = false; b.note = null;
-  drawHud();
+  checkTier(s);
+  drawHud(); drawStreak();
   buzz(s, 0.55, 35);
   if (flaccid && s) recoil(s, dirVec, power);
 }
-
-/* a hit should make the rubber blade kick back and wobble */
 function recoil(s, dirVec, power){
   for (let i=1;i<NODES;i++)
-    s.vel[i].addScaledVector(dirVec, -3.2*power*(i/(NODES-1)));
+    s.vel[i].addScaledVector(dirVec, -2.4*power*(i/(NODES-1)));
 }
-
 function registerMiss(b){
   combo = 0; misses++;
   b.grp.visible = false; b.note = null;
-  drawHud('miss');
+  checkTier(null);
+  drawHud('miss'); drawStreak();
 }
 
 function checkSabers(dt, generous){
@@ -1048,8 +1305,7 @@ function checkSabers(dt, generous){
   const halfBox = BLOCK*L.box;
   for (const s of sabers){
     if (!s.src || !s.inited) continue;
-    /* the blade's own motion, which in flaccid mode is not your hand's */
-    s.swing.copy(s.nodes[NODES-2]).sub(s.prevNodes[NODES-2]).divideScalar(Math.max(dt,1e-4));
+    s.swing.copy(s.disp[NODES-2]).sub(s.prevDisp[NODES-2]).divideScalar(Math.max(dt,1e-4));
     const sp = s.swing.length();
     if (sp <= L.spd) continue;
     for (const b of blocks){
@@ -1057,7 +1313,7 @@ function checkSabers(dt, generous){
       const p = b.grp.position;
       let touched = false;
       for (let k=1;k<NODES && !touched;k++)
-        touched = segHitsBox(s.prevNodes[k], s.nodes[k], p.x, p.y, p.z, halfBox);
+        touched = segHitsBox(s.prevDisp[k], s.disp[k], p.x, p.y, p.z, halfBox);
       if (!touched) continue;
       const want = DIRS[b.note.dir];
       _a.set(s.swing.x, s.swing.y, 0).normalize();
@@ -1071,7 +1327,7 @@ function checkSabers(dt, generous){
 }
 
 function tick(dt){
-  if (!playing) return;
+  if (!playing){ stepRewards(dt, 0); return; }
   const t = songTime(), v = speed(), L = LEN();
   const lead = (12 + HIT_PLANE)/v;
   const anyDir = L.align < -1;
@@ -1092,8 +1348,10 @@ function tick(dt){
     b.grp.visible = true;
   }
 
+  let live = 0;
   for (const b of blocks){
     if (!b.note) continue;
+    live++;
     b.grp.position.z = (t - b.note.t)*v + HIT_PLANE;
     const near = THREE.MathUtils.clamp(1 + b.grp.position.z/9, 0.4, 1);
     b.body.material.emissiveIntensity = 0.7 + near*0.7;
@@ -1106,12 +1364,27 @@ function tick(dt){
 
   if (!autoPlay) checkSabers(dt, false);
 
+  /* beat pulse, metronome, rewards */
+  let pulse = 0;
   if (chart){
     let ph = ((t - chart.phase)/chart.beat) % 1;
     if (ph < 0) ph += 1;
-    const k = Math.max(0, 1 - ph*3.2);
-    for (const h of railHalos) h.material.opacity = 0.1 + k*0.38;
+    pulse = Math.max(0, 1 - ph*3.2);
+    for (const h of railHalos) h.material.opacity = 0.1 + pulse*0.38;
+
+    if (metro){
+      if (metroNext === 0) metroNext = Math.ceil((t - chart.phase)/chart.beat);
+      while (chart.phase + metroNext*chart.beat < t + 0.4){
+        const musicT = chart.phase + metroNext*chart.beat;
+        const when = startedAt + musicT;
+        if (when > ac.currentTime + 0.01) click(when, metroNext % 4 === 0);
+        metroNext++;
+      }
+    }
   }
+  stepRewards(dt, pulse);
+
+  if (finishing && live === 0 && nextNote >= notes.length) endRun();
 }
 
 function handleButtons(){
@@ -1150,15 +1423,13 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (renderer.xr.isPresenting){
     handleButtons();
-    for (const s of sabers){
-      if (s.src) updateSaber(s, dt); else hideSaber(s);
-    }
+    for (const s of sabers){ if (s.src) updateSaber(s, dt); else hideSaber(s); }
   } else {
     for (const s of sabers) hideSaber(s);
   }
   if (test) tickTest(dt); else tick(dt);
   stepDebris(dt);
-  if (!renderer.xr.isPresenting) hud.lookAt(camera.position);
+  if (!renderer.xr.isPresenting){ hud.lookAt(camera.position); streakPanel.lookAt(camera.position); }
   renderer.render(scene, camera);
 });
 
@@ -1173,6 +1444,7 @@ $('diff').selectedIndex = diffIdx;
 $('speed').selectedIndex = speedIdx;
 $('len').selectedIndex = lenIdx;
 $('flop').checked = flaccid;
+$('metro').checked = metro;
 
 function rechart(){
   if (!chart) return;
@@ -1196,33 +1468,77 @@ $('flop').addEventListener('change', e => {
   flaccid = e.target.checked; save();
   for (const s of sabers) s.inited = false;
 });
+$('metro').addEventListener('change', e => { metro = e.target.checked; save(); });
+
+/* A chart is just onsets + tempo, so it can be computed once on a fast machine,
+   committed next to the MP3, and loaded instantly in the headset. Difficulty
+   still rebuilds the blocks from these onsets at run time. */
+let chartName = 'song';
+
+async function fetchChartFor(name){
+  const base = name.replace(/\.[^.]+$/, '');
+  for (const cand of [base + '.chart.json', name + '.chart.json']){
+    try{
+      const r = await fetch(cand);
+      if (!r.ok) continue;
+      const d = await r.json();
+      if (d && Array.isArray(d.onsets) && d.beat) return d;
+    } catch(e){}
+  }
+  return null;
+}
 
 async function loadArrayBuffer(ab, label){
-  btnVR.disabled = true; btnPrev.disabled = true;
+  btnVR.disabled = true; btnPrev.disabled = true; $('btn-chart').disabled = true;
   prog.style.width = '0%';
+  chartName = label.replace(/\.[^.]+$/, '');
   try{
     say('Decoding ' + label + '…');
     songBuf = await audioCtx().decodeAudioData(ab);
 
-    say('Preparing audio…');
-    const mono = await toMono(songBuf, ANALYSIS_RATE);
-
-    const t0 = performance.now();
-    chart = await analyze(mono, p => {
-      prog.style.width = (p*100).toFixed(0)+'%';
-      say(`Analyzing ${label} — ${(p*100).toFixed(0)}%`);
-    });
+    const pre = await fetchChartFor(label);
+    if (pre){
+      chart = pre;
+      prog.style.width = '100%';
+      say(`Loaded prebuilt chart for ${label}.`);
+    } else {
+      say('Preparing audio…');
+      const mono = await toMono(songBuf, ANALYSIS_RATE);
+      const t0 = performance.now();
+      chart = await analyze(mono, p => {
+        prog.style.width = (p*100).toFixed(0)+'%';
+        say(`Analyzing ${label} — ${(p*100).toFixed(0)}%`);
+      });
+      prog.style.width = '100%';
+      console.log('analysis took', ((performance.now()-t0)/1000).toFixed(1), 's');
+    }
     bpm = chart.bpm;
-    prog.style.width = '100%';
-    console.log('analysis took', ((performance.now()-t0)/1000).toFixed(1), 's');
     rechart();
     btnPrev.disabled = false;
+    $('btn-chart').disabled = false;
     probeXR();
   } catch(err){
     console.error(err);
     say('Could not load that file: ' + err.message, true);
   }
 }
+
+$('btn-chart').addEventListener('click', () => {
+  if (!chart) return;
+  const data = {
+    v: 1, bpm: chart.bpm, beat: chart.beat, phase: chart.phase,
+    duration: chart.duration,
+    onsets: chart.onsets.map(o => ({
+      t: +o.t.toFixed(4), band: o.band, strength: +o.strength.toFixed(3) })),
+  };
+  const blob = new Blob([JSON.stringify(data)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = chartName + '.chart.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  say(`Saved ${a.download} — put it next to the MP3 and it loads instantly.`);
+});
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0];
   if (f) await loadArrayBuffer(await f.arrayBuffer(), f.name);
@@ -1258,16 +1574,20 @@ btnVR.addEventListener('click', async () => {
     autoPlay = false; songStarted = false; test = null; testResult = null;
     for (const s of sabers) s.inited = false;
     hud.position.set(0, 2.25, -3.2); hud.rotation.set(0,0,0);
+    streakPanel.position.set(1.62, 1.62, -2.5);
+    streakPanel.rotation.set(0, -0.55, 0);
+    setTier(0); lastTier = 0; tierGlow = 0;
     setTimeout(() => openMenu('main'), 700);
     session.addEventListener('end', () => {
-      killSource(); playing = false; closeMenu(); test = null;
+      killSource(); playing = false; finishing = false; closeMenu(); test = null;
       for (const s of sabers) hideSaber(s);
       ui.style.display = 'flex';
       $('diff').selectedIndex = diffIdx;
       $('speed').selectedIndex = speedIdx;
       $('len').selectedIndex = lenIdx;
       $('flop').checked = flaccid;
-      say(`Run over — ${hits} hit, ${misses} missed, best combo ${best}. Offset ${syncOffsetMs} ms.`);
+      $('metro').checked = metro;
+      say(`Run over — ${hits} hit, ${misses} missed, best streak ${best}. Offset ${syncOffsetMs} ms.`);
     });
   } catch(err){ say('Could not start: ' + err.message, true); }
 });
