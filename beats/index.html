@@ -170,6 +170,94 @@ async function toMono(buf, rate){
   return await off.startRendering();
 }
 
+/* Split the track into chunks, estimate tempo in each, and report the spread.
+   ~0 means a machine-steady click track; a few percent means a drifting one. */
+function measureDrift(sum, fps, beat0){
+  const CH = 8, n = sum.length, per = Math.floor(n/CH);
+  if (per < fps*4) return 0;
+  const est = [];
+  for (let c=0;c<CH;c++){
+    const s = c*per, e = s + per;
+    let bl = 0, bv = -1;
+    const lo = Math.max(2, Math.floor(beat0*fps*0.78));
+    const hi = Math.ceil(beat0*fps*1.28);
+    for (let lag=lo; lag<=hi; lag++){
+      let acc = 0, cnt = 0;
+      for (let f=s; f+lag<e; f++){ acc += sum[f]*sum[f+lag]; cnt++; }
+      if (!cnt) continue;
+      acc /= cnt;
+      if (acc > bv){ bv = acc; bl = lag; }
+    }
+    if (bl) est.push(bl/fps);
+  }
+  if (est.length < 4) return 0;
+  const mean = est.reduce((a,b) => a+b, 0)/est.length;
+  let v = 0;
+  for (const e of est) v += (e-mean)*(e-mean);
+  return Math.sqrt(v/est.length)/mean;        // coefficient of variation
+}
+
+/* Ellis-style dynamic-programming beat tracker. Each beat scores the onset
+   strength under it, minus a penalty for straying from the local period — so
+   the grid tracks a tempo that speeds up or slows down instead of fighting it. */
+function trackBeats(sum, fps, beat0, centre){
+  const n = sum.length;
+  if (n < 8) return [];
+
+  /* smooth, then normalise, so loud sections don't dominate quiet ones */
+  const env = new Float32Array(n);
+  for (let i=0;i<n;i++){
+    let a = 0, c = 0;
+    for (let k=Math.max(0,i-2); k<=Math.min(n-1,i+2); k++){ a += sum[k]; c++; }
+    env[i] = a/c;
+  }
+  const W = Math.round(fps*3);
+  for (let i=0;i<n;i++){
+    let mx = 1e-6;
+    for (let k=Math.max(0,i-W); k<Math.min(n,i+W); k++) if (env[k] > mx) mx = env[k];
+    env[i] /= mx;
+  }
+
+  const tau = beat0*fps;
+  const lo = Math.max(2, Math.round(tau*0.70));
+  const hi = Math.round(tau*1.42);
+  const ALPHA = 42;                      // how firmly tempo is held
+
+  const C = new Float32Array(n);
+  const P = new Int32Array(n).fill(-1);
+  const pen = new Float32Array(hi+1);
+  for (let l=lo;l<=hi;l++){ const r = Math.log(l/tau); pen[l] = -ALPHA*r*r; }
+
+  for (let i=0;i<n;i++){
+    let bs = -Infinity, bj = -1;
+    for (let l=lo;l<=hi;l++){
+      const j = i-l;
+      if (j < 0) break;
+      const s = C[j] + pen[l];
+      if (s > bs){ bs = s; bj = j; }
+    }
+    if (bj < 0){ C[i] = env[i]; P[i] = -1; }
+    else { C[i] = env[i] + bs; P[i] = bj; }
+  }
+
+  /* start the backtrace from the best score near the end */
+  let endI = n-1, endV = -Infinity;
+  for (let i=Math.max(0, n-Math.round(tau*2)); i<n; i++)
+    if (C[i] > endV){ endV = C[i]; endI = i; }
+
+  const idx = [];
+  for (let i=endI; i >= 0; i = P[i]){ idx.push(i); if (P[i] < 0) break; }
+  idx.reverse();
+
+  const beats = idx.map(i => i/fps + centre);
+  /* drop a ragged first beat if it sits well off the following period */
+  if (beats.length > 3){
+    const d0 = beats[1]-beats[0], d1 = beats[2]-beats[1];
+    if (d0 < d1*0.55) beats.shift();
+  }
+  return beats;
+}
+
 async function analyze(buf, onProgress){
   const N = 1024, HOP = 256, sr = buf.sampleRate;
   const L = buf.getChannelData(0);
@@ -230,6 +318,7 @@ async function analyze(buf, onProgress){
   const sum = new Float32Array(frames);
   for (let f=0;f<frames;f++) sum[f] = env[0][f]*1.4 + env[1][f]*1.1 + env[2][f]*0.6;
 
+  /* Average tempo, as a starting point for the tracker below. */
   let bestLag = 0, bestVal = -1;
   for (let lag = Math.floor(fps*0.30); lag < Math.floor(fps*1.05); lag++){
     let acc = 0;
@@ -241,29 +330,29 @@ async function analyze(buf, onProgress){
   while (beat > 0.75) beat /= 2;
   while (beat < 0.30) beat *= 2;
 
-  let phase = 0, phScore = -1;
-  for (let p=0;p<128;p++){
-    const ph = p/128*beat;
-    let sc = 0;
-    for (let t=ph; t*fps < frames; t += beat) sc += sum[Math.round(t*fps)] || 0;
-    if (sc > phScore){ phScore = sc; phase = ph; }
-  }
-  phase += CENTRE;
+  /* How much does the tempo actually wander? Estimate it per chunk and compare.
+     AI-generated tracks are rendered as audio rather than played to a click,
+     so their tempo drifts, and a single fixed grid will not fit them. */
+  const drift = measureDrift(sum, fps, beat);
 
-  /* Which of the four beats is the downbeat? Assume 4/4 and pick the offset
-     where the kick lands hardest — that's almost always beat one. */
+  /* Follow the beat rather than assume it: dynamic-programming beat tracking
+     yields an actual list of beat times that bends with the music. */
+  const beats = trackBeats(sum, fps, beat, CENTRE);
+  onProgress(0.88); await yieldFrame();
+
+  /* Downbeat: of the four positions in a bar, the one where the kick is
+     heaviest. Measured against the tracked beats, not a formula. */
   let downK = 0, dbScore = -1;
   for (let k=0;k<4;k++){
     let sc = 0;
-    for (let t = phase + k*beat; t*fps < frames; t += beat*4){
-      const f = Math.round(t*fps);
+    for (let i=k;i<beats.length;i+=4){
+      const f = Math.round((beats[i]-CENTRE)*fps);
       if (f >= 0 && f < frames) sc += env[0][f] + env[1][f]*0.4;
     }
     if (sc > dbScore){ dbScore = sc; downK = k; }
   }
   const barLen = beat*4;
-  let bar0 = phase + downK*beat;
-  while (bar0 - barLen > 0) bar0 -= barLen;   // first downbeat in the track
+  const bar0 = beats.length ? beats[downK] : CENTRE;
 
   onProgress(0.9); await yieldFrame();
 
@@ -285,7 +374,8 @@ async function analyze(buf, onProgress){
     }
   }
   onProgress(1);
-  return { onsets, bpm: Math.round(60/beat), beat, phase, bar0, barLen, duration: buf.duration };
+  return { onsets, bpm: Math.round(60/beat), beat, phase: beats.length ? beats[0] : CENTRE,
+           beats, downK, drift, bar0, barLen, duration: buf.duration };
 }
 
 /* ══════════════════ difficulty → chart ══════════════════ */
@@ -294,12 +384,50 @@ async function analyze(buf, onProgress){
    is then forced onto beat one of that bar, so you come in on a downbeat. */
 const START_BARS = [2, 3, 4, 8];
 
+/* nearest index in a sorted array */
+function nearestBeat(beats, t){
+  let lo = 0, hi = beats.length-1;
+  if (hi < 0) return -1;
+  while (lo < hi){
+    const mid = (lo+hi)>>1;
+    if (beats[mid] < t) lo = mid+1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(beats[lo-1]-t) <= Math.abs(beats[lo]-t)) lo--;
+  return lo;
+}
+
+/* Snap to the tracked grid, subdividing between real beats. Returns the
+   original time unchanged when the nearest grid point is too far to trust. */
+function snapTime(a, t, div, tol){
+  const B = a.beats;
+  if (!B || B.length < 2) return t;
+  const i = nearestBeat(B, t);
+  let best = B[i], bd = Math.abs(B[i]-t);
+  for (const j of [i-1, i]){
+    if (j < 0 || j+1 >= B.length) continue;
+    const span = B[j+1]-B[j];
+    for (let k=1;k<div;k++){
+      const c = B[j] + span*k/div;
+      const d = Math.abs(c-t);
+      if (d < bd){ bd = d; best = c; }
+    }
+  }
+  return bd <= tol ? best : t;
+}
+
 function chartStart(a, barsIdx){
+  const bars = START_BARS[barsIdx];
+  const B = a.beats;
+  if (B && B.length > 4){
+    const d0 = a.downK || 0;
+    let i = d0 + bars*4;
+    while (i < B.length && B[i] < 2.2) i += 4;      // need room to fly in
+    if (i < B.length) return B[i];
+  }
   const barLen = a.barLen || a.beat*4;
   const bar0 = a.bar0 ?? a.phase ?? 0;
-  let bars = START_BARS[barsIdx];
-  let t = bar0 + bars*barLen;
-  while (t < 2.2){ bars++; t = bar0 + bars*barLen; }   // need room to fly in
+  let n = bars, t = bar0 + n*barLen;
+  while (t < 2.2){ n++; t = bar0 + n*barLen; }
   return t;
 }
 
@@ -321,7 +449,29 @@ function buildChart(a, dIdx, barsIdx){
   const step = beat / D.div;
   let pool = onsets.filter(o => D.bands.includes(o.band));
 
-  if (D.forceGrid){
+  /* Quantising is only safe when there IS a stable grid. On a drifting track
+     (anything AI-generated, typically) snapping drags onsets away from the
+     drum that made them, so leave the detected times alone. */
+  const B = a.beats;
+  const haveBeats = !!(B && B.length > 8);
+  const quant = quantMode === 2 ? true
+              : quantMode === 0 ? false
+              : haveBeats && (a.drift ?? 0) < 0.012;
+
+  if (D.forceGrid && haveBeats){
+    /* Easy: at most one block per beat, placed on the tracked beat itself. */
+    const bucket = new Map();
+    for (const o of pool){
+      const i = nearestBeat(B, o.t);
+      if (i < 0) continue;
+      const span = (i+1 < B.length ? B[i+1]-B[i] : beat);
+      if (Math.abs(B[i]-o.t) > span*0.34) continue;
+      const cur = bucket.get(i);
+      if (!cur || o.strength > cur.strength)
+        bucket.set(i, { t:B[i], band:o.band, strength:o.strength });
+    }
+    pool = [...bucket.values()];
+  } else if (D.forceGrid){
     const bucket = new Map();
     for (const o of pool){
       const idx = Math.round((o.t - phase)/step);
@@ -332,12 +482,14 @@ function buildChart(a, dIdx, barsIdx){
         bucket.set(idx, { t:gt, band:o.band, strength:o.strength });
     }
     pool = [...bucket.values()];
-  } else {
+  } else if (quant){
     pool = pool.map(o => {
-      const gt = phase + Math.round((o.t - phase)/step)*step;
-      const on = Math.abs(gt - o.t) < 0.05;
-      return { t: on ? gt : o.t, band:o.band, strength: o.strength*(on?1.3:1) };
+      const gt = snapTime(a, o.t, D.div, 0.045);
+      const on = gt !== o.t;
+      return { t:gt, band:o.band, strength: o.strength*(on?1.25:1) };
     });
+  } else {
+    pool = pool.map(o => ({ t:o.t, band:o.band, strength:o.strength }));
   }
 
   if (D.melKeep < 1){
@@ -444,6 +596,8 @@ let flaccid  = localStorage.getItem('cutline2.flop') === '1';
 let metro    = localStorage.getItem('cutline2.metro') === '1';
 let barsIdx  = Number(localStorage.getItem('cutline2.bars') ?? 1);
 let wormSpin = localStorage.getItem('cutline2.worm') !== '0';   // comfort toggle
+let quantMode = Number(localStorage.getItem('cutline2.quant') ?? 1);  // 0 off · 1 auto · 2 on
+const QUANT_NAMES = ['off', 'auto', 'on'];
 
 const LEN = () => LENS[lenIdx];
 const speed = () => SPEEDS[speedIdx].v;
@@ -456,6 +610,7 @@ function save(){
   localStorage.setItem('cutline2.metro', metro ? '1' : '0');
   localStorage.setItem('cutline2.bars', String(barsIdx));
   localStorage.setItem('cutline2.worm', wormSpin ? '1' : '0');
+  localStorage.setItem('cutline2.quant', String(quantMode));
 }
 
 function tierOf(c){
@@ -1151,6 +1306,7 @@ const MAIN = [
   { id:'offset',  label:() => 'Block timing', value:() => timingMs === 0 ? '0 ms' : (timingMs>0?'+'+timingMs+' ms later':timingMs+' ms earlier'), split:true },
   { id:'metro',   label:() => 'Metronome', value:() => metro ? 'ON' : 'off' },
   { id:'bars',    label:() => 'Start after', value:() => START_BARS[barsIdx] + ' bars' },
+  { id:'quant',   label:() => 'Snap to grid', value:() => QUANT_NAMES[quantMode] },
   { id:'len',     label:() => 'Hit window', value:() => LENS[lenIdx].name },
   { id:'diff',    label:() => 'Difficulty', value:() => DIFFS[diffIdx].name },
   { id:'speed',   label:() => 'Block speed', value:() => SPEEDS[speedIdx].name },
@@ -1268,6 +1424,7 @@ function activate(id, side, s){
       timingMs = Math.max(-LEAD_MAX, Math.min(LEAD_MAX, timingMs + (side || 10))); break;
     case 'metro': metro = !metro; break;
     case 'bars':  barsIdx = (barsIdx+1)%START_BARS.length; rechartLive(); break;
+    case 'quant': quantMode = (quantMode+1)%3; rechartLive(); break;
     case 'len':   lenIdx = (lenIdx+1)%LENS.length; break;
     case 'diff':  diffIdx = (diffIdx+1)%DIFFS.length; rechartLive(); break;
     case 'speed': speedIdx = (speedIdx+1)%SPEEDS.length; break;
@@ -1364,7 +1521,7 @@ function tickTest(dt){
 /* ══════════════════ gameplay ══════════════════ */
 
 let notes = [], nextNote = 0, playing = false, startedAt = 0, source = null;
-let autoPlay = false, pausedAt = 0, finishing = false, metroNext = 0;
+let autoPlay = false, pausedAt = 0, finishing = false, metroIdx = -1;
 
 const songTime = () => ac ? (ac.currentTime - startedAt) - timingMs/1000 : 0;
 
@@ -1373,7 +1530,7 @@ function resetRun(){
   for (const n of notes){ n.hit = false; n.spawned = false; }
   nextNote = 0; score = 0; combo = 0; best = 0; hits = 0; misses = 0;
   lastTier = 0; setTier(0); tierGlow = 0;
-  finishing = false; metroNext = 0;
+  finishing = false; metroIdx = -1;
   drawHud('go'); drawStreak();
 }
 function makeSource(offsetSec){
@@ -1391,7 +1548,7 @@ function makeSource(offsetSec){
 function killSource(){ if (source){ try { source.onended=null; source.stop(); } catch(e){} source=null; } }
 function startSong(){ killSource(); resetRun(); songStarted = true; makeSource(0); }
 function pauseSong(){ pausedAt = songTime(); killSource(); playing = false; }
-function resumeSong(){ if (!songStarted) return startSong(); metroNext = 0; makeSource(pausedAt); }
+function resumeSong(){ if (!songStarted) return startSong(); metroIdx = -1; makeSource(pausedAt); }
 
 function endRun(){
   playing = false; finishing = false; songStarted = false;
@@ -1537,20 +1694,27 @@ function tick(dt){
   /* beat pulse, metronome, rewards */
   let pulse = 0;
   if (chart){
-    let ph = ((t - chart.phase)/chart.beat) % 1;
-    if (ph < 0) ph += 1;
-    pulse = Math.max(0, 1 - ph*3.2);
-    for (const h of railHalos) h.material.opacity = 0.1 + pulse*0.38;
-
-    if (metro){
-      if (metroNext === 0) metroNext = Math.ceil((t - chart.phase)/chart.beat);
-      while (chart.phase + metroNext*chart.beat < t + 0.4){
-        const musicT = chart.phase + metroNext*chart.beat;
-        const when = startedAt + musicT;
-        if (when > ac.currentTime + 0.01) click(when, metroNext % 4 === 0);
-        metroNext++;
+    const B = chart.beats;
+    if (B && B.length > 1){
+      const i = nearestBeat(B, t);
+      const last = B[i] <= t ? B[i] : (i > 0 ? B[i-1] : B[0]);
+      const span = chart.beat || 0.5;
+      pulse = Math.max(0, 1 - ((t - last)/span)*3.2);
+      if (metroIdx < 0) metroIdx = nearestBeat(B, t);
+      while (metroIdx < B.length && B[metroIdx] < t + 0.4){
+        if (metro){
+          const when = startedAt + B[metroIdx] + timingMs/1000;
+          if (when > ac.currentTime + 0.01)
+            click(when, ((metroIdx - (chart.downK||0)) % 4 + 4) % 4 === 0);
+        }
+        metroIdx++;
       }
+    } else {
+      let ph = ((t - chart.phase)/chart.beat) % 1;
+      if (ph < 0) ph += 1;
+      pulse = Math.max(0, 1 - ph*3.2);
     }
+    for (const h of railHalos) h.material.opacity = 0.1 + pulse*0.38;
   }
   stepRewards(dt, pulse);
 
@@ -1623,7 +1787,12 @@ function rechart(){
   notes = buildChart(chart, diffIdx, barsIdx);
   const per = (notes.length/chart.duration).toFixed(1);
   const s0 = chartStart(chart, barsIdx).toFixed(1);
-  say(`${notes.length} blocks · ${per}/sec · ~${bpm} BPM · first block at ${s0}s.`);
+  const d = (chart.drift ?? 0)*100;
+  const steady = d < 1.2;
+  const dtxt = chart.beats && chart.beats.length
+    ? ` · tempo ${steady ? 'steady' : 'drifts ' + d.toFixed(1) + '%'}${steady ? '' : ', grid follows it'}`
+    : '';
+  say(`${notes.length} blocks · ${per}/sec · ~${bpm} BPM · first block at ${s0}s${dtxt}.`);
 }
 function rechartLive(){
   if (!chart) return;
@@ -1701,8 +1870,10 @@ async function loadArrayBuffer(ab, label){
 $('btn-chart').addEventListener('click', () => {
   if (!chart) return;
   const data = {
-    v: 1, bpm: chart.bpm, beat: chart.beat, phase: chart.phase,
-    duration: chart.duration,
+    v: 2, bpm: chart.bpm, beat: chart.beat, phase: chart.phase,
+    downK: chart.downK || 0, drift: +(chart.drift || 0).toFixed(5),
+    bar0: chart.bar0, barLen: chart.barLen, duration: chart.duration,
+    beats: (chart.beats || []).map(t => +t.toFixed(4)),
     onsets: chart.onsets.map(o => ({
       t: +o.t.toFixed(4), band: o.band, strength: +o.strength.toFixed(3) })),
   };
